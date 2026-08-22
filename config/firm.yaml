@@ -1,0 +1,8 @@
+# Firm identity. Used to recognise the lawyer's own messages inside a quoted
+# trail (those become the style examples) and to address the draft correctly.
+
+lawyer_name: רותם פרגון
+firm_name: רותם פרגון, משרד עורכי דין
+addresses:
+  - rotem@law-fr.co.il
+  - office3@law-fr.co.il

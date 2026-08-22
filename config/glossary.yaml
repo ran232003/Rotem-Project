@@ -1,0 +1,40 @@
+# Terms of art for Israeli immigration and status law.
+#
+# Two jobs:
+#   1. Anchor the model's vocabulary so it uses the exact term rather than a
+#      plausible paraphrase. In legal Hebrew a near-synonym is a wrong answer.
+#   2. Later, keep these multiword terms intact in the lexical (BM25) index.
+
+terms:
+  - he: אשרת חוזר
+    en: re-entry visa
+  - he: בקשת מקלט
+    en: asylum application
+  - he: רישיון ב/1
+    en: B/1 permit
+  - he: תושבות ארעית א/5
+    en: A5 temporary residency
+  - he: רשות האוכלוסין וההגירה
+    en: Population and Immigration Authority
+  - he: כנות הקשר
+    en: genuineness of the relationship
+  - he: מרכז חיים
+    en: centre of life
+  - he: הליך מדורג
+    en: graduated procedure
+  - he: הסדרת מעמד
+    en: status regularisation
+  - he: מסמכים ציבוריים
+    en: public documents
+  - he: אפוסטיל
+    en: apostille
+  - he: תרגום נוטריוני
+    en: notarised translation
+  - he: לשכת רשות האוכלוסין
+    en: Population Authority bureau
+  - he: ועדה בין משרדית
+    en: inter-ministerial committee
+  - he: צו הרחקה
+    en: removal order
+  - he: שימוע
+    en: hearing

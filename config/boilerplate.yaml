@@ -1,0 +1,23 @@
+# Patterns for stripping repeated non-content from email bodies.
+#
+# Boilerplate is pure noise: it repeats in every message, wastes tokens, and
+# pollutes retrieval with text that matches everything and means nothing.
+
+# Everything from the earliest match to the end of the body is dropped.
+truncate_from:
+  - 'The information in this electronic message'
+  - 'If you are not the intended recipient'
+  - 'This message and it''?s content is not intended'
+  - 'This email and any attachments are confidential'
+  - 'הודעה זו והקבצים המצורפים אליה'
+  - 'הודעה זו מיועדת לנמען'
+  - '^\s*Tel:\s*\+?[\d\-\s/()]+$'
+  - '^\s*Fax:\s*\+?[\d\-\s/()]+$'
+  - '^\s*טל[''׳]?:\s*\+?[\d\-\s/()]+$'
+
+# Individual lines matching these are removed, the rest of the body is kept.
+remove_lines:
+  - '^\s*\[cid:[^\]]+\]\s*$'
+  - '^\s*<https?://[^>]+>\s*$'
+  - '^\s*_{10,}\s*$'
+  - '^\s*-{10,}\s*$'

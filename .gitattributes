@@ -1,0 +1,4 @@
+# MIME messages must be preserved byte for byte. Line-ending conversion would
+# change header folding and body content, so the parser tests would no longer be
+# exercising a realistic message.
+*.eml -text
