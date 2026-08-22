@@ -1,8 +1,10 @@
-# Hebrew Legal Email Draft Agent — Phase 0
+# Hebrew Legal Email Draft Agent
 
 Generates a Hebrew reply draft for incoming law-firm email, for review by the
-lawyer. Phase 0 runs entirely offline from a saved `.eml` file: no Microsoft
-Graph, no vector store, no UI, and nothing is ever sent.
+lawyer. Nothing is ever sent: drafts are written to the Drafts folder and wait
+for a human. Phase 0 runs offline from a saved `.eml` file; the Outlook
+connector reads a live mailbox and writes real drafts. No vector store or UI
+yet.
 
 ## Setup
 
@@ -38,6 +40,50 @@ Outputs land in `out/`: `draft.html` (open in a browser for correct
 right-to-left rendering), `draft.txt`, and `report.json` with the coverage
 check, placeholders and token usage. The exit code is non-zero when a hard
 problem is found, so this can gate a batch evaluation later.
+
+## Outlook desktop
+
+The connector drives classic Outlook for Windows over COM rather than calling
+Microsoft Graph. This is deliberate: COM needs no Azure AD app registration, no
+tenant admin consent and no client secret, because it reuses the Outlook session
+the user is already signed into. On a corporate tenant where you cannot register
+an application, it is the only route in. The trade-offs are that it is Windows
+only, Outlook must be running, and it cannot poll while the machine is asleep.
+
+Requires the classic Outlook client. The new Outlook for Windows does not expose
+a COM object model.
+
+```bash
+copy config\mailbox.example.yaml config\mailbox.yaml
+```
+
+`allowed_senders` in that file is a hard boundary, not a filter for convenience.
+Every read path checks it before returning a message, so pointing the agent at a
+mailbox that also holds unrelated mail cannot expose that mail. `config/mailbox.yaml`
+is git-ignored because it names real mailboxes.
+
+```bash
+python -m rotem_agent.cli outlook-scan  --sender client@example.com
+python -m rotem_agent.cli outlook-draft --sender client@example.com
+python -m rotem_agent.cli outlook-draft --sender client@example.com --save
+```
+
+`outlook-scan` lists matching messages across the whole mailbox, since mail from
+an external address is often filed by a rule rather than left in the Inbox.
+`outlook-draft` replies to the newest match, or use `--index` for an older one.
+Without `--save` it is a dry run that only writes to `out/`. With `--save` it
+creates a threaded reply in Drafts, categorised `AI draft` so machine-written
+drafts are obvious in the folder list.
+
+To see how a draft renders without touching a real thread:
+
+```bash
+python -m rotem_agent.cli outlook-demo samples\thread.eml --to you@example.com --save
+```
+
+A caution on corporate mailboxes: message text is sent to the Gemini API, so
+running this against an employer's mail may breach their acceptable-use or data
+protection policy regardless of how the allowlist is set. Use it on mail you own.
 
 ## Source policy
 
@@ -110,6 +156,8 @@ This repository must never contain privileged material.
 - `config/glossary.yaml` — terms of art, to stop the model paraphrasing where
   the exact term matters.
 - `config/boilerplate.yaml` — patterns for disclaimers and signature blocks.
+- `config/mailbox.yaml` — which mailbox to read and which senders may be read.
+  Git-ignored; copy from `config/mailbox.example.yaml`.
 
 ## Known limits
 
@@ -130,5 +178,11 @@ This repository must never contain privileged material.
   for this when editing the glossary.
 - Hebrew wording is occasionally wrong in ways only a native reader catches, so
   every draft needs review regardless of what the checks say.
-- Matter resolution, Microsoft 365 integration and signature injection are not
-  implemented in Phase 0.
+- Signature handling is incomplete. A draft that ends with a typed sign-off is
+  flagged, because Outlook appends the real signature separately and the two
+  would duplicate. The connector does not yet inject the firm signature.
+- The Outlook connector has no polling loop, no delta tracking and no record of
+  which messages it has already answered, so re-running it on the same thread
+  produces another draft.
+- Matter resolution and retrieval over client files are not implemented, so the
+  only context is the email thread itself.

@@ -1,0 +1,9 @@
+# Copy to config/mailbox.yaml, which is gitignored, and fill in real addresses.
+#
+# allowed_senders is a hard boundary. The agent refuses to read any message whose
+# sender is not listed here, so pointing it at a mailbox that also holds unrelated
+# mail cannot expose that mail. Start with one test address.
+
+mailbox: you@example.com
+allowed_senders:
+  - client@example.com

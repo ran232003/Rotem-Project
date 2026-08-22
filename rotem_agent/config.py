@@ -46,7 +46,7 @@ class Firm:
 
 
 def load_firm(path: Path | None = None) -> Firm:
-    data = _read_yaml(path or CONFIG_DIR / "firm.yaml")
+    data = read_yaml(path or CONFIG_DIR / "firm.yaml")
     return Firm(
         lawyer_name=data.get("lawyer_name", ""),
         firm_name=data.get("firm_name", ""),
@@ -61,7 +61,7 @@ class GlossaryTerm:
 
 
 def load_glossary(path: Path | None = None) -> list[GlossaryTerm]:
-    data = _read_yaml(path or CONFIG_DIR / "glossary.yaml")
+    data = read_yaml(path or CONFIG_DIR / "glossary.yaml")
     return [GlossaryTerm(he=t["he"], en=t.get("en", "")) for t in data.get("terms", [])]
 
 
@@ -72,7 +72,7 @@ class BoilerplateRules:
 
 
 def load_boilerplate(path: Path | None = None) -> BoilerplateRules:
-    data = _read_yaml(path or CONFIG_DIR / "boilerplate.yaml")
+    data = read_yaml(path or CONFIG_DIR / "boilerplate.yaml")
     flags = re.MULTILINE | re.IGNORECASE
     return BoilerplateRules(
         truncate_from=[re.compile(p, flags) for p in data.get("truncate_from", [])],
@@ -80,7 +80,7 @@ def load_boilerplate(path: Path | None = None) -> BoilerplateRules:
     )
 
 
-def _read_yaml(path: Path) -> dict:
+def read_yaml(path: Path) -> dict:
     if not path.exists():
         raise ConfigError(f"Missing config file: {path}")
     with path.open("r", encoding="utf-8") as handle:
