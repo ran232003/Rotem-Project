@@ -1,0 +1,15 @@
+# Copy to config/matters.yaml, which is gitignored.
+#
+# root holds one folder per matter, each containing a matter.yaml and a docs/
+# subfolder. A relative path is resolved against the project root; use an
+# absolute path to keep client files outside the repository, which is what you
+# want in production.
+#
+#   C:\Firm\clients\
+#     anna-cohen-reentry-visa\
+#       matter.yaml
+#       docs\
+#         passport.pdf
+#         ministry-letter.pdf
+
+root: clients

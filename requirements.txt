@@ -5,5 +5,10 @@ beautifulsoup4>=4.12.3
 lxml>=5.2.0
 pytest>=8.2.0
 
+# Client document ingestion and retrieval
+pypdf>=4.2.0
+python-docx>=1.1.2
+numpy>=1.24.0
+
 # Outlook desktop integration. Windows only; the rest of the package works without it.
 pywin32>=306; sys_platform == "win32"

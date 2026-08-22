@@ -2,7 +2,11 @@
 out/
 samples/*.eml
 config/mailbox.yaml
+config/matters.yaml
 state/
+
+# Client documents. Privileged material must never reach version control.
+clients/
 __pycache__/
 *.py[cod]
 .pytest_cache/

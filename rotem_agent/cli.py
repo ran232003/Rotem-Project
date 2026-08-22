@@ -11,9 +11,11 @@ from rotem_agent.config import OUT_DIR, ConfigError, load_settings
 from rotem_agent.drafting.composer import compose, render_draft_html, render_internal_note
 from rotem_agent.llm.gemini import GeminiClient
 from rotem_agent.mailparse.parser import ParsedEmail, parse_eml
+from rotem_agent.matters import MatterRegistry, load_matters_root
 from rotem_agent.outlook import OutlookError, OutlookMailbox, load_mailbox_config
+from rotem_agent.retrieval import ChunkStore, GeminiEmbedder, ingest_matter, search
 from rotem_agent.skill import load_skill
-from rotem_agent.state import DraftLedger
+from rotem_agent.state import ConversationMatters, DraftLedger
 from rotem_agent.watch import WatchOptions, run_cycle, watch
 
 
@@ -36,6 +38,11 @@ def main(argv: list[str] | None = None) -> int:
         default="advisory",
         help="strict forces a holding reply when a legal proposition cannot be verified",
     )
+    draft_cmd.add_argument("--matter", default=None, help="Override matter resolution")
+    draft_cmd.add_argument(
+        "--no-files", action="store_true", help="Ignore client documents entirely"
+    )
+    draft_cmd.add_argument("--no-embed", action="store_true", help="Lexical retrieval only")
 
     scan_cmd = sub.add_parser(
         "outlook-scan", help="List messages from an allowed sender in the local Outlook"
@@ -60,6 +67,9 @@ def main(argv: list[str] | None = None) -> int:
     oldraft_cmd.add_argument(
         "--source-policy", choices=("strict", "advisory"), default="advisory"
     )
+    oldraft_cmd.add_argument("--matter", default=None)
+    oldraft_cmd.add_argument("--no-files", action="store_true")
+    oldraft_cmd.add_argument("--no-embed", action="store_true")
 
     watch_cmd = sub.add_parser(
         "outlook-watch",
@@ -90,9 +100,34 @@ def main(argv: list[str] | None = None) -> int:
     watch_cmd.add_argument(
         "--source-policy", choices=("strict", "advisory"), default="advisory"
     )
+    watch_cmd.add_argument("--no-files", action="store_true")
+    watch_cmd.add_argument("--no-embed", action="store_true")
 
     ledger_cmd = sub.add_parser("ledger", help="Inspect what the agent has already drafted")
     ledger_cmd.add_argument("--forget", metavar="KEY", default=None)
+
+    sub.add_parser("matters", help="List client matters and their indexed documents")
+
+    new_cmd = sub.add_parser("matter-new", help="Scaffold a folder for a new matter")
+    new_cmd.add_argument("slug")
+    new_cmd.add_argument("--client", default="", help="Client name")
+    new_cmd.add_argument("--category", default="admin")
+    new_cmd.add_argument("--address", action="append", default=None, help="Repeatable")
+
+    ingest_cmd = sub.add_parser("ingest", help="Index the documents in a matter folder")
+    ingest_cmd.add_argument("--matter", default=None, help="Defaults to every matter")
+    ingest_cmd.add_argument("--force", action="store_true", help="Re-index unchanged files")
+    ingest_cmd.add_argument(
+        "--no-embed",
+        action="store_true",
+        help="Lexical index only; skips the embedding API entirely",
+    )
+
+    search_cmd = sub.add_parser("search", help="Query a matter's documents")
+    search_cmd.add_argument("query")
+    search_cmd.add_argument("--matter", required=True)
+    search_cmd.add_argument("--top", type=int, default=6)
+    search_cmd.add_argument("--no-embed", action="store_true")
 
     demo_cmd = sub.add_parser(
         "outlook-demo",
@@ -119,9 +154,17 @@ def main(argv: list[str] | None = None) -> int:
             return _run_outlook_watch(args)
         if args.command == "ledger":
             return _run_ledger(args)
+        if args.command == "matters":
+            return _run_matters()
+        if args.command == "matter-new":
+            return _run_matter_new(args)
+        if args.command == "ingest":
+            return _run_ingest(args)
+        if args.command == "search":
+            return _run_search(args)
         if args.command == "outlook-demo":
             return _run_outlook_demo(args)
-        return _run_draft(args.eml, args.model, args.out, args.source_policy)
+        return _run_draft(args)
     except (ConfigError, OutlookError) as exc:
         print(f"\nError: {exc}", file=sys.stderr)
         return 2
@@ -142,11 +185,16 @@ def _run_parse(path: Path) -> int:
     return 0
 
 
-def _run_draft(path: Path, model: str | None, out_dir: Path, source_policy: str) -> int:
-    email = parse_eml(path)
+def _run_draft(args) -> int:
+    email = parse_eml(args.eml)
     _print_summary(email)
-    report = _compose(email, model, source_policy)
-    _emit(report, out_dir)
+    excerpts = (
+        []
+        if args.no_files
+        else _retrieve(email, args.matter, no_embed=args.no_embed)
+    )
+    report = _compose(email, args.model, args.source_policy, excerpts)
+    _emit(report, args.out)
     return 0 if report.ok else 1
 
 
@@ -156,11 +204,13 @@ def _make_drafter(model: str | None, source_policy: str):
     client = GeminiClient(api_key=settings.gemini_api_key, model=model or settings.model)
     skill = load_skill()
     print(f"\nDrafting with {client.model}, source policy '{source_policy}' ...")
-    return lambda email: compose(email, client, skill=skill, source_policy=source_policy)
+    return lambda email, excerpts=None: compose(
+        email, client, skill=skill, source_policy=source_policy, excerpts=excerpts
+    )
 
 
-def _compose(email: ParsedEmail, model: str | None, source_policy: str):
-    return _make_drafter(model, source_policy)(email)
+def _compose(email: ParsedEmail, model: str | None, source_policy: str, excerpts=None):
+    return _make_drafter(model, source_policy)(email, excerpts)
 
 
 def _emit(report, out_dir: Path) -> None:
@@ -207,6 +257,165 @@ def _emit(report, out_dir: Path) -> None:
     print(f"\nWrote {out_dir / 'draft.html'} and {out_dir / 'internal_note.md'}")
 
 
+def _embedder(disabled: bool):
+    """None means lexical-only retrieval, which needs no API calls."""
+    if disabled:
+        return None
+    return GeminiEmbedder(api_key=load_settings().gemini_api_key)
+
+
+def _run_matters() -> int:
+    registry = MatterRegistry.discover()
+    if not registry.matters:
+        print(f"No matters found under {load_matters_root()}")
+        print("Create one with: python -m rotem_agent.cli matter-new <slug>")
+        return 1
+    with ChunkStore() as store:
+        for matter in registry.matters:
+            documents = store.documents(matter.slug)
+            chunks = sum(d.chunks for d in documents)
+            print(f"\n{matter.slug}")
+            print(f"  client   : {matter.client_name or '-'}  ({matter.category or '-'})")
+            print(f"  addresses: {', '.join(matter.client_addresses) or '-'}")
+            if matter.agent_addresses:
+                print(f"  agents   : {', '.join(matter.agent_addresses)}")
+            print(f"  indexed  : {len(documents)} document(s), {chunks} chunk(s)")
+            for document in documents:
+                flag = "  NEEDS OCR" if document.needs_ocr else ""
+                print(f"    - {document.rel_path} ({document.chunks} chunks){flag}")
+    return 0
+
+
+def _run_matter_new(args) -> int:
+    root = load_matters_root()
+    directory = root / args.slug
+    if directory.exists():
+        print(f"{directory} already exists", file=sys.stderr)
+        return 1
+    (directory / "docs").mkdir(parents=True)
+    addresses = args.address or []
+    lines = [
+        f"client_name: {args.client or args.slug}",
+        f"category: {args.category}",
+        "",
+        "# Addresses belonging to the client. These identify the matter.",
+        "addresses:",
+        *(f"  - {a}" for a in addresses),
+        "",
+        "# Third parties who correspond about this matter, such as a relocation",
+        "# agency. An agency writes for many clients, so these never identify the",
+        "# matter on their own.",
+        "agents:",
+        "",
+        "notes: ''",
+    ]
+    (directory / "matter.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"Created {directory}")
+    print(f"Put the client's documents in {directory / 'docs'}, then run: ")
+    print(f"  python -m rotem_agent.cli ingest --matter {args.slug}")
+    return 0
+
+
+def _run_ingest(args) -> int:
+    registry = MatterRegistry.discover()
+    targets = registry.matters
+    if args.matter:
+        matter = registry.by_slug(args.matter)
+        if matter is None:
+            print(f"No matter with slug {args.matter}", file=sys.stderr)
+            return 1
+        targets = [matter]
+    if not targets:
+        print("No matters to index.")
+        return 1
+
+    embedder = _embedder(args.no_embed)
+    print(f"Embeddings: {embedder.name if embedder else 'disabled (lexical only)'}")
+    needs_ocr: list[str] = []
+    with ChunkStore() as store:
+        for matter in targets:
+            print(f"\n{matter.slug}")
+            summary = ingest_matter(matter, store, embedder, force=args.force)
+            print(
+                f"  {len(summary.added)} indexed, {len(summary.unchanged)} unchanged, "
+                f"{len(summary.removed)} removed, {len(summary.skipped)} unsupported, "
+                f"{summary.chunks} new chunk(s)"
+            )
+            needs_ocr += [f"{matter.slug}/{p}" for p in summary.needs_ocr]
+
+    if needs_ocr:
+        # Silence here would be dangerous: the file looks indexed but holds
+        # nothing, so the agent would answer as though the document were absent.
+        print("\nThese look like scans and are not searchable without OCR:")
+        for item in needs_ocr:
+            print(f"  - {item}")
+    return 0
+
+
+def _run_search(args) -> int:
+    embedder = _embedder(args.no_embed)
+    with ChunkStore() as store:
+        hits = search(store, args.matter, args.query, embedder, top_k=args.top)
+    if not hits:
+        print("No matches. Has this matter been ingested?")
+        return 1
+    for hit in hits:
+        print(f"\n[{hit.citation}]  score {hit.score:.4f}  found by {hit.found_by}")
+        print(hit.text[:400] + ("..." if len(hit.text) > 400 else ""))
+    return 0
+
+
+def _retrieve(
+    email: ParsedEmail,
+    matter_slug: str | None,
+    *,
+    conversation_id: str | None = None,
+    no_embed: bool = False,
+    top_k: int = 6,
+) -> list:
+    """Find passages in the client's file that bear on this email.
+
+    Returns an empty list rather than raising when no matter can be identified:
+    a draft written from the thread alone is the current behaviour and is safe,
+    whereas guessing a matter would mix one client's papers into another's reply.
+    """
+    try:
+        registry = MatterRegistry.discover()
+    except ConfigError as exc:
+        print(f"Client files not configured, drafting from the thread alone. ({exc})")
+        return []
+
+    if matter_slug:
+        matter = registry.by_slug(matter_slug)
+        if matter is None:
+            print(f"No matter with slug {matter_slug}", file=sys.stderr)
+            return []
+    else:
+        memory = ConversationMatters()
+        resolution = registry.resolve(
+            [p.email for p in email.participants],
+            known_slug=memory.get(conversation_id),
+        )
+        if not resolution.ok:
+            print(f"No client file attached: {resolution.reason}")
+            for candidate in resolution.candidates:
+                print(f"  candidate: {candidate.slug}")
+            if resolution.ambiguous:
+                print("  pass --matter <slug> to choose.")
+            return []
+        matter = resolution.matter
+        memory.remember(conversation_id, matter.slug)
+        print(f"Matter: {matter.slug} ({resolution.reason})")
+
+    query = f"{email.subject}\n{email.latest_body}"[:2000]
+    with ChunkStore() as store:
+        hits = search(store, matter.slug, query, _embedder(no_embed), top_k=top_k)
+    print(f"Retrieved {len(hits)} excerpt(s) from {matter.slug}")
+    for hit in hits:
+        print(f"  {hit.citation}  ({hit.found_by})")
+    return hits
+
+
 def _mailbox() -> "OutlookMailbox":
     config = load_mailbox_config()
     box = OutlookMailbox(config)
@@ -248,7 +457,17 @@ def _run_outlook_draft(args) -> int:
     email = box.to_parsed_email(found.item)
     _print_summary(email)
 
-    report = _compose(email, args.model, args.source_policy)
+    excerpts = (
+        []
+        if args.no_files
+        else _retrieve(
+            email,
+            args.matter,
+            conversation_id=found.conversation_id,
+            no_embed=args.no_embed,
+        )
+    )
+    report = _compose(email, args.model, args.source_policy, excerpts)
     _emit(report, args.out)
 
     if args.save:
@@ -283,12 +502,21 @@ def _run_outlook_watch(args) -> int:
     print(f"Ledger holds {len(ledger)} answered message(s) at {ledger.path}")
     if not args.save:
         print("Dry run: no drafts will be written. Pass --save to create them.")
+    retriever = (
+        None
+        if args.no_files
+        else lambda email, conversation_id: _retrieve(
+            email, None, conversation_id=conversation_id, no_embed=args.no_embed
+        )
+    )
     if args.once:
-        created = len(run_cycle(box, ledger, senders, drafter, options))
+        created = len(run_cycle(box, ledger, senders, drafter, options, print, retriever))
     else:
         print(f"Polling every {args.interval}s. Press Ctrl+C to stop.")
         try:
-            created = watch(box, ledger, senders, drafter, options)
+            created = watch(
+                box, ledger, senders, drafter, options, retrieve_fn=retriever
+            )
         except KeyboardInterrupt:
             print("\nStopped.")
             return 0

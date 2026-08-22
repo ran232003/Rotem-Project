@@ -74,9 +74,10 @@ def run_cycle(
     box: OutlookMailbox,
     ledger: DraftLedger,
     senders: Sequence[str],
-    draft_fn: Callable[[object], object],
+    draft_fn: Callable[..., object],
     options: WatchOptions,
     log: Callable[[str], None] = print,
+    retrieve_fn: Callable[[object, str | None], list] | None = None,
 ) -> list[LedgerEntry]:
     """One pass: find unanswered mail from the allowed senders and draft it."""
     matches: list[FoundMessage] = []
@@ -98,7 +99,8 @@ def run_cycle(
     for match in pending:
         log(f"  drafting: {match.subject}  [{match.received}]")
         email = box.to_parsed_email(match.item)
-        report = draft_fn(email)
+        excerpts = retrieve_fn(email, match.conversation_id) if retrieve_fn else []
+        report = draft_fn(email, excerpts)
 
         draft_entry_id = None
         if options.save:
@@ -134,11 +136,12 @@ def watch(
     box: OutlookMailbox,
     ledger: DraftLedger,
     senders: Sequence[str],
-    draft_fn: Callable[[object], object],
+    draft_fn: Callable[..., object],
     options: WatchOptions,
     log: Callable[[str], None] = print,
     sleep: Callable[[float], None] = time.sleep,
     max_cycles: int | None = None,
+    retrieve_fn: Callable[[object, str | None], list] | None = None,
 ) -> int:
     """Poll until interrupted. Returns the number of drafts created."""
     total = 0
@@ -146,7 +149,9 @@ def watch(
     while max_cycles is None or cycle < max_cycles:
         cycle += 1
         try:
-            total += len(run_cycle(box, ledger, senders, draft_fn, options, log))
+            total += len(
+                run_cycle(box, ledger, senders, draft_fn, options, log, retrieve_fn)
+            )
         except Exception as exc:  # Outlook restarts and transient COM faults
             log(f"  cycle failed: {exc}")
             box.connect()

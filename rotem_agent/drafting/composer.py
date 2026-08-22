@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import re
 from dataclasses import dataclass, field
+from typing import Protocol
 
 from rotem_agent.analysis.questions import AskSet, extract_asks
 from rotem_agent.config import Firm, GlossaryTerm, load_firm, load_glossary
@@ -27,6 +28,20 @@ _LEAKED_INTERNAL = re.compile(
 _GATED_CLIENT_TYPES = {"opposing_party", "unknown"}
 
 
+class Excerpt(Protocol):
+    """A retrieved passage from the client's file.
+
+    Declared structurally so drafting does not depend on the retrieval package;
+    anything carrying a citation and text will do.
+    """
+
+    @property
+    def citation(self) -> str: ...
+
+    @property
+    def text(self) -> str: ...
+
+
 @dataclass(frozen=True)
 class Answer:
     ask: str
@@ -46,6 +61,7 @@ class InternalNote:
     key_facts: list[str] = field(default_factory=list)
     missing_facts: list[str] = field(default_factory=list)
     likely_sources: list[str] = field(default_factory=list)
+    sources_used: list[str] = field(default_factory=list)
     unverified_propositions: list[str] = field(default_factory=list)
     escalation_triggers: list[str] = field(default_factory=list)
 
@@ -77,17 +93,19 @@ def compose(
     glossary: list[GlossaryTerm] | None = None,
     skill: Skill | None = None,
     source_policy: str = "advisory",
+    excerpts: list[Excerpt] | None = None,
 ) -> DraftReport:
     firm = firm or load_firm()
     glossary = glossary if glossary is not None else load_glossary()
     skill = skill or load_skill()
+    excerpts = excerpts or []
 
     asks = extract_asks(email.latest_body, llm)
     style_examples = _style_examples(email.quoted_chain, firm)
 
     response = llm.complete_json(
         system=build_system_prompt(firm, glossary, skill, source_policy),
-        user=build_user_prompt(email, asks, style_examples),
+        user=build_user_prompt(email, asks, style_examples, excerpts),
         schema=DRAFT_SCHEMA,
         temperature=0.3,
     )
@@ -104,7 +122,9 @@ def compose(
     ]
 
     draft_text = str(draft.get("body", "")).strip()
-    problems, warnings = _verify(draft_text, answers, asks, email, internal, source_policy, firm)
+    problems, warnings = _verify(
+        draft_text, answers, asks, email, internal, source_policy, firm, excerpts
+    )
     effective_approval, approval_warning = _enforce_approval(internal)
     if approval_warning:
         warnings.append(approval_warning)
@@ -142,6 +162,7 @@ def _internal_note(data: dict) -> InternalNote:
         key_facts=strings("key_facts"),
         missing_facts=strings("missing_facts"),
         likely_sources=strings("likely_sources"),
+        sources_used=strings("sources_used"),
         unverified_propositions=strings("unverified_propositions"),
         escalation_triggers=strings("escalation_triggers"),
     )
@@ -191,9 +212,11 @@ def _verify(
     internal: InternalNote,
     source_policy: str,
     firm: Firm,
+    excerpts: list[Excerpt] | None = None,
 ) -> tuple[list[str], list[str]]:
     problems: list[str] = []
     warnings: list[str] = []
+    excerpts = excerpts or []
 
     if not draft_text:
         problems.append("The model returned an empty draft.")
@@ -267,7 +290,19 @@ def _verify(
             f"Language mismatch: incoming email is {expected} but the draft is not."
         )
 
-    if ungrounded := _ungrounded_numbers(draft_text, email.context_text()):
+    supplied = {excerpt.citation for excerpt in excerpts}
+    invented = [c for c in internal.sources_used if c not in supplied]
+    if invented:
+        problems.append(
+            "The draft claims to rely on document(s) that were never supplied: "
+            + ", ".join(invented)
+        )
+
+    # Retrieved excerpts are facts about this matter, so a number taken from one
+    # is grounded. Without this the check would flag every real file number and
+    # date the client's own documents provide.
+    context = "\n\n".join([email.context_text(), *(e.text for e in excerpts)])
+    if ungrounded := _ungrounded_numbers(draft_text, context):
         warnings.append(
             "Numbers in the draft that do not appear in the source context: "
             + ", ".join(ungrounded)
@@ -353,6 +388,7 @@ def render_internal_note(report: DraftReport) -> str:
         ("Key facts", note.key_facts),
         ("Missing facts", note.missing_facts),
         ("Likely official sources", note.likely_sources),
+        ("Client documents relied on", note.sources_used),
         ("Unverified propositions", note.unverified_propositions),
         ("Escalation triggers", note.escalation_triggers),
         ("Placeholders", report.placeholders),

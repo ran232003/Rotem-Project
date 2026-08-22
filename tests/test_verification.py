@@ -55,6 +55,56 @@ def _asks(*texts: str) -> AskSet:
     )
 
 
+class _Excerpt:
+    def __init__(self, citation: str, text: str) -> None:
+        self.citation = citation
+        self.text = text
+
+
+def test_a_fabricated_document_citation_is_a_problem():
+    """The model must not claim to have read a file it was never shown."""
+    problems, _ = _verify(
+        "שלום רב, בהתאם למסמכים בתיק הבקשה הוגשה כנדרש ואנו ממתינים למענה הרשות.",
+        [Answer(ask="a", answered=True, excerpt="x")],
+        _asks("a"),
+        _email("שאלה ארוכה דיה כדי לזהות שפה עברית בהודעה הנכנסת הזו"),
+        _note(sources_used=["ministry-letter.pdf#2"]),
+        "advisory",
+        FIRM,
+        [_Excerpt("passport.pdf#0", "דרכון")],
+    )
+    assert any("never supplied" in p for p in problems)
+
+
+def test_a_real_document_citation_passes():
+    problems, _ = _verify(
+        "שלום רב, בהתאם למסמכים בתיק הבקשה הוגשה כנדרש ואנו ממתינים למענה הרשות.",
+        [Answer(ask="a", answered=True, excerpt="x")],
+        _asks("a"),
+        _email("שאלה ארוכה דיה כדי לזהות שפה עברית בהודעה הנכנסת הזו"),
+        _note(sources_used=["passport.pdf#0"]),
+        "advisory",
+        FIRM,
+        [_Excerpt("passport.pdf#0", "דרכון")],
+    )
+    assert not any("never supplied" in p for p in problems)
+
+
+def test_a_number_from_a_client_document_counts_as_grounded():
+    """Otherwise every real file number in the client's own papers gets flagged."""
+    _, warnings = _verify(
+        "שלום רב, מספר התיק שלך הוא 458822 ואנו ממתינים למענה הרשות בעניין זה.",
+        [Answer(ask="a", answered=True, excerpt="x")],
+        _asks("a"),
+        _email("שאלה ארוכה דיה כדי לזהות שפה עברית בהודעה הנכנסת הזו"),
+        _note(),
+        "advisory",
+        FIRM,
+        [_Excerpt("ministry.pdf#1", "מספר תיק 458822 נפתח בלשכה")],
+    )
+    assert not any("do not appear" in w for w in warnings)
+
+
 def test_ungrounded_numbers_ignores_list_markers_and_placeholders():
     draft = "1. נמתין 45 ימים.\n2. נעדכן עד [[להשלמה: 99]].\n3. תוך 7 שנים."
     assert _ungrounded_numbers(draft, "המתנה של 45 ימים") == ["7"]

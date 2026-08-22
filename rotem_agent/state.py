@@ -96,5 +96,39 @@ class DraftLedger:
         os.replace(temp, self.path)
 
 
+class ConversationMatters:
+    """Remembers which matter a conversation belongs to.
+
+    Address matching alone loses a thread the moment someone new is copied in,
+    or when a client writes from a second address. Once a thread has been placed,
+    it stays placed.
+    """
+
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = path or STATE_DIR / "conversations.json"
+        self._map: dict[str, str] = {}
+        if self.path.exists():
+            try:
+                self._map = json.loads(self.path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                self._map = {}
+
+    def get(self, conversation_id: str | None) -> str | None:
+        if not conversation_id:
+            return None
+        return self._map.get(conversation_id)
+
+    def remember(self, conversation_id: str | None, slug: str) -> None:
+        if not conversation_id:
+            return
+        if self._map.get(conversation_id) == slug:
+            return
+        self._map[conversation_id] = slug
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temp = self.path.with_suffix(".tmp")
+        temp.write_text(json.dumps(self._map, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temp, self.path)
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")

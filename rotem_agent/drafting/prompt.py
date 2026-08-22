@@ -51,6 +51,7 @@ DRAFT_SCHEMA: dict[str, Any] = {
                 "key_facts": {"type": "array", "items": {"type": "string"}},
                 "missing_facts": {"type": "array", "items": {"type": "string"}},
                 "likely_sources": {"type": "array", "items": {"type": "string"}},
+                "sources_used": {"type": "array", "items": {"type": "string"}},
                 "unverified_propositions": {"type": "array", "items": {"type": "string"}},
                 "escalation_triggers": {"type": "array", "items": {"type": "string"}},
                 "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
@@ -65,6 +66,7 @@ DRAFT_SCHEMA: dict[str, Any] = {
                 "key_facts",
                 "missing_facts",
                 "likely_sources",
+                "sources_used",
                 "unverified_propositions",
                 "escalation_triggers",
                 "confidence",
@@ -142,6 +144,18 @@ Where a fact is required but absent from the supplied context, write
 {placeholder} describing what is missing. Never guess a date, a number of days,
 a duration, an amount, a file number or a statutory reference.
 
+# Client file excerpts
+
+Any excerpts supplied under "מסמכים מתיק הלקוח" are passages retrieved from this
+client's own file. They are facts about this matter and you may rely on them.
+
+Each excerpt carries an identifier such as `letter.pdf#3`. For every fact you
+take from an excerpt, list that identifier in internal.sources_used. List only
+identifiers that were actually supplied to you: never construct one, and never
+name a document you were not shown. Retrieval returns the passages that looked
+relevant, not necessarily ones that are, so an excerpt that does not bear on the
+question should simply be left unused rather than worked into the reply.
+
 # Output
 
 Return JSON matching the provided schema. The internal object is the internal
@@ -171,7 +185,12 @@ def build_system_prompt(
     )
 
 
-def build_user_prompt(email: ParsedEmail, asks: AskSet, style_examples: list[QuotedMessage]) -> str:
+def build_user_prompt(
+    email: ParsedEmail,
+    asks: AskSet,
+    style_examples: list[QuotedMessage],
+    excerpts: list[Any] | None = None,
+) -> str:
     sections = [
         "## פרטי ההודעה הנכנסת",
         f"נושא: {email.subject}",
@@ -193,6 +212,11 @@ def build_user_prompt(email: ParsedEmail, asks: AskSet, style_examples: list[Quo
     if style_examples:
         sections += ["", "## דוגמאות לסגנון הכתיבה של המשרד (חקה אותן)"]
         sections += [_format_quoted(m) for m in style_examples]
+
+    if excerpts:
+        sections += ["", "## מסמכים מתיק הלקוח"]
+        for excerpt in excerpts:
+            sections.append(f"\n--- [{excerpt.citation}]\n{excerpt.text}".rstrip())
 
     sections += ["", "## שאלות ובקשות שיש לענות עליהן"]
     sections += [f"{i}. [{a.kind}] {a.text}" for i, a in enumerate(asks.asks, start=1)]
