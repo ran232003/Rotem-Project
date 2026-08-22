@@ -41,6 +41,21 @@ def test_rtl_html_marks_direction_and_splits_paragraphs():
     assert "<br>" in html
 
 
+def test_a_single_paragraph_reply_is_broken_at_its_numbered_items():
+    """The model sometimes returns the whole reply on one line."""
+    html = rtl_html("שלום, להלן המענה: 1. התשובה הראשונה. 2. התשובה השנייה. בברכה")
+    assert html.count("<p ") == 3
+
+
+def test_numbering_already_on_its_own_line_is_left_alone():
+    html = rtl_html("שלום,\n\n1. ראשונה\n\n2. שנייה")
+    assert html.count("<p ") == 3
+
+
+def test_a_decimal_number_mid_sentence_is_not_treated_as_a_list():
+    assert rtl_html("הסכום הוא 1.500 שקלים בלבד").count("<p ") == 1
+
+
 def test_rtl_html_escapes_markup():
     assert "<b>" not in rtl_html("שלום <b>מודגש</b>")
     assert "&lt;b&gt;" in rtl_html("שלום <b>מודגש</b>")

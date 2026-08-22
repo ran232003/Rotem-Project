@@ -94,18 +94,20 @@ def compose(
     skill: Skill | None = None,
     source_policy: str = "advisory",
     excerpts: list[Excerpt] | None = None,
+    attachment_excerpts: list[Excerpt] | None = None,
 ) -> DraftReport:
     firm = firm or load_firm()
     glossary = glossary if glossary is not None else load_glossary()
     skill = skill or load_skill()
     excerpts = excerpts or []
+    attachment_excerpts = attachment_excerpts or []
 
     asks = extract_asks(email.latest_body, llm)
     style_examples = _style_examples(email.quoted_chain, firm)
 
     response = llm.complete_json(
         system=build_system_prompt(firm, glossary, skill, source_policy),
-        user=build_user_prompt(email, asks, style_examples, excerpts),
+        user=build_user_prompt(email, asks, style_examples, excerpts, attachment_excerpts),
         schema=DRAFT_SCHEMA,
         temperature=0.3,
     )
@@ -123,7 +125,14 @@ def compose(
 
     draft_text = str(draft.get("body", "")).strip()
     problems, warnings = _verify(
-        draft_text, answers, asks, email, internal, source_policy, firm, excerpts
+        draft_text,
+        answers,
+        asks,
+        email,
+        internal,
+        source_policy,
+        firm,
+        [*excerpts, *attachment_excerpts],
     )
     effective_approval, approval_warning = _enforce_approval(internal)
     if approval_warning:

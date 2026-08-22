@@ -10,6 +10,7 @@ from email.utils import format_datetime, formataddr
 from pathlib import Path
 from typing import Any, Iterator
 
+from rotem_agent.attachments import safe_filename
 from rotem_agent.config import (
     CONFIG_DIR,
     BoilerplateRules,
@@ -231,6 +232,30 @@ class OutlookMailbox:
         parsed = parse_message(message, self._rules)
         return dataclasses.replace(parsed, attachments=_attachments(item))
 
+    def save_attachments(self, item: Any, destination: Path) -> list[Path]:
+        """Write the message's real attachments to disk and return their paths.
+
+        Inline images are skipped: a signature logo sets the attachment flag and
+        can be most of a message's bytes while carrying no case information.
+        """
+        destination.mkdir(parents=True, exist_ok=True)
+        saved: list[Path] = []
+        for attachment in _safe(lambda: item.Attachments, []) or []:
+            name = str(_safe(lambda: attachment.FileName, "") or "").strip()
+            if not name:
+                continue
+            content_id = _prop(attachment, PR_ATTACH_CONTENT_ID)
+            guessed = mimetypes.guess_type(name)[0] or ""
+            if content_id and guessed.startswith("image/"):
+                continue
+            target = destination / safe_filename(name)
+            try:
+                attachment.SaveAsFile(str(target))
+            except Exception:
+                continue
+            saved.append(target)
+        return saved
+
     # ------------------------------------------------------------------- drafts
 
     def create_reply_draft(self, item: Any, body_text: str, *, save: bool = True) -> Any:
@@ -256,12 +281,19 @@ class OutlookMailbox:
         return mail
 
 
+# A numbered item running on from the previous sentence rather than starting a
+# line. The model sometimes returns the whole reply as one paragraph, which would
+# otherwise reach the lawyer as a wall of text.
+_INLINE_ENUMERATION = re.compile(r"(?<=[^\n])[ \t]+(?=\d{1,2}[.)][ \t])")
+
+
 def rtl_html(text: str) -> str:
     """Wrap the Hebrew draft so Outlook renders it right-to-left.
 
     Without an explicit dir attribute Outlook infers direction per paragraph,
     which strands punctuation and any Latin words on the wrong side.
     """
+    text = _INLINE_ENUMERATION.sub("\n\n", text.strip())
     blocks = [b for b in re.split(r"\n{2,}", text.strip()) if b.strip()]
     paragraphs = "".join(
         f'<p style="margin:0 0 10pt 0">{html.escape(b).replace(chr(10), "<br>")}</p>'

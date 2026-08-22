@@ -107,6 +107,28 @@ is a brute-force dot product over one matter's chunks. At a few hundred chunks
 per matter that is instant, and an approximate-nearest-neighbour index would add
 a fragile native dependency for no measurable gain.
 
+### Attachments on the incoming email
+
+Files attached to the email being answered are read too, and are kept separate
+from the matter's filed documents in the prompt. The distinction is deliberate:
+a filed document has been through the office, whereas an attachment is what the
+sender has just asserted. The model is told to confirm receipt and, where an
+attachment appears to contradict the client file, to flag it for the lawyer
+rather than resolve the conflict itself.
+
+Attachments are saved to `out/attachments/`, and filenames are sanitised because
+a name arriving by email is untrusted and `../` in one would otherwise write
+outside that folder. Inline images are skipped, so a signature logo is not
+mistaken for a document. A long attachment is trimmed to the passages that best
+match the email rather than to its first pages, which would favour letterheads.
+
+A scanned attachment is reported as unread rather than passed through empty:
+
+```
+attachment not read: passport.pdf: looks like a scan with no text layer, so its
+contents are not available to the draft. Hebrew OCR is not wired up yet.
+```
+
 ### Grounding
 
 Retrieved excerpts are quoted into the prompt with an identifier such as

@@ -144,10 +144,19 @@ Where a fact is required but absent from the supplied context, write
 {placeholder} describing what is missing. Never guess a date, a number of days,
 a duration, an amount, a file number or a statutory reference.
 
-# Client file excerpts
+# Document excerpts
 
-Any excerpts supplied under "מסמכים מתיק הלקוח" are passages retrieved from this
-client's own file. They are facts about this matter and you may rely on them.
+Two kinds of document passage may be supplied, and the difference matters.
+
+"מסמכים מתיק הלקוח" are passages retrieved from the client's existing file. They
+are established facts about this matter.
+
+"קבצים שצורפו להודעה זו" are passages from files attached to the email you are
+answering. The sender has just provided them, so treat them as what the sender
+asserts rather than as something the office has already checked. If such a file
+answers a question, say so and confirm receipt; if it appears to conflict with
+the client file, do not resolve the conflict yourself, note it in
+internal.escalation_triggers and leave it for the lawyer.
 
 Each excerpt carries an identifier such as `letter.pdf#3`. For every fact you
 take from an excerpt, list that identifier in internal.sources_used. List only
@@ -165,7 +174,12 @@ confidence levels into draft.body. Do not include a signature or sign-off with
 the firm name in draft.body; the signature is appended separately.
 
 Set draft.language to match the language of the incoming email. Write the
-internal note fields in Hebrew regardless, since the lawyer reads them."""
+internal note fields in Hebrew regardless, since the lawyer reads them.
+
+Format draft.body as an email, not as a paragraph of prose. Separate the
+greeting, each numbered answer, any closing remark and the sign-off with a blank
+line, using a real newline character in the JSON string. A reply that answers
+several questions in one unbroken block is hard to read and hard to check."""
 
 
 def build_system_prompt(
@@ -190,6 +204,7 @@ def build_user_prompt(
     asks: AskSet,
     style_examples: list[QuotedMessage],
     excerpts: list[Any] | None = None,
+    attachments: list[Any] | None = None,
 ) -> str:
     sections = [
         "## פרטי ההודעה הנכנסת",
@@ -217,6 +232,11 @@ def build_user_prompt(
         sections += ["", "## מסמכים מתיק הלקוח"]
         for excerpt in excerpts:
             sections.append(f"\n--- [{excerpt.citation}]\n{excerpt.text}".rstrip())
+
+    if attachments:
+        sections += ["", "## קבצים שצורפו להודעה זו"]
+        for attachment in attachments:
+            sections.append(f"\n--- [{attachment.citation}]\n{attachment.text}".rstrip())
 
     sections += ["", "## שאלות ובקשות שיש לענות עליהן"]
     sections += [f"{i}. [{a.kind}] {a.text}" for i, a in enumerate(asks.asks, start=1)]

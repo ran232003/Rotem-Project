@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from rotem_agent.analysis.questions import extract_asks
+from rotem_agent.attachments import excerpts_from_files, save_eml_attachments
 from rotem_agent.config import OUT_DIR, ConfigError, load_settings
 from rotem_agent.drafting.composer import compose, render_draft_html, render_internal_note
 from rotem_agent.llm.gemini import GeminiClient
@@ -188,12 +189,15 @@ def _run_parse(path: Path) -> int:
 def _run_draft(args) -> int:
     email = parse_eml(args.eml)
     _print_summary(email)
-    excerpts = (
-        []
-        if args.no_files
-        else _retrieve(email, args.matter, no_embed=args.no_embed)
-    )
-    report = _compose(email, args.model, args.source_policy, excerpts)
+
+    excerpts: list = []
+    attachments: list = []
+    if not args.no_files:
+        excerpts = _retrieve(email, args.matter, no_embed=args.no_embed)
+        saved = save_eml_attachments(args.eml, args.out / "attachments")
+        attachments = _read_attachments(saved, email)
+
+    report = _compose(email, args.model, args.source_policy, excerpts, attachments)
     _emit(report, args.out)
     return 0 if report.ok else 1
 
@@ -204,13 +208,36 @@ def _make_drafter(model: str | None, source_policy: str):
     client = GeminiClient(api_key=settings.gemini_api_key, model=model or settings.model)
     skill = load_skill()
     print(f"\nDrafting with {client.model}, source policy '{source_policy}' ...")
-    return lambda email, excerpts=None: compose(
-        email, client, skill=skill, source_policy=source_policy, excerpts=excerpts
+    return lambda email, excerpts=None, attachments=None: compose(
+        email,
+        client,
+        skill=skill,
+        source_policy=source_policy,
+        excerpts=excerpts,
+        attachment_excerpts=attachments,
     )
 
 
-def _compose(email: ParsedEmail, model: str | None, source_policy: str, excerpts=None):
-    return _make_drafter(model, source_policy)(email, excerpts)
+def _compose(
+    email: ParsedEmail,
+    model: str | None,
+    source_policy: str,
+    excerpts=None,
+    attachments=None,
+):
+    return _make_drafter(model, source_policy)(email, excerpts, attachments)
+
+
+def _read_attachments(paths: list[Path], email: ParsedEmail) -> list:
+    if not paths:
+        return []
+    query = f"{email.subject}\n{email.latest_body}"
+    excerpts, notes = excerpts_from_files(paths, query)
+    for note in notes:
+        print(f"  attachment not read: {note}")
+    for excerpt in excerpts:
+        print(f"  attachment excerpt: {excerpt.citation}")
+    return excerpts
 
 
 def _emit(report, out_dir: Path) -> None:
@@ -457,17 +484,19 @@ def _run_outlook_draft(args) -> int:
     email = box.to_parsed_email(found.item)
     _print_summary(email)
 
-    excerpts = (
-        []
-        if args.no_files
-        else _retrieve(
+    excerpts: list = []
+    attachments: list = []
+    if not args.no_files:
+        excerpts = _retrieve(
             email,
             args.matter,
             conversation_id=found.conversation_id,
             no_embed=args.no_embed,
         )
-    )
-    report = _compose(email, args.model, args.source_policy, excerpts)
+        saved = box.save_attachments(found.item, args.out / "attachments")
+        attachments = _read_attachments(saved, email)
+
+    report = _compose(email, args.model, args.source_policy, excerpts, attachments)
     _emit(report, args.out)
 
     if args.save:
@@ -502,13 +531,15 @@ def _run_outlook_watch(args) -> int:
     print(f"Ledger holds {len(ledger)} answered message(s) at {ledger.path}")
     if not args.save:
         print("Dry run: no drafts will be written. Pass --save to create them.")
-    retriever = (
-        None
-        if args.no_files
-        else lambda email, conversation_id: _retrieve(
-            email, None, conversation_id=conversation_id, no_embed=args.no_embed
+    def retriever(email, match):
+        excerpts = _retrieve(
+            email, None, conversation_id=match.conversation_id, no_embed=args.no_embed
         )
-    )
+        saved = box.save_attachments(match.item, OUT_DIR / "attachments")
+        return excerpts, _read_attachments(saved, email)
+
+    if args.no_files:
+        retriever = None
     if args.once:
         created = len(run_cycle(box, ledger, senders, drafter, options, print, retriever))
     else:
