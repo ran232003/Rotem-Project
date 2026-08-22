@@ -214,6 +214,59 @@ A caution on corporate mailboxes: message text is sent to the Gemini API, so
 running this against an employer's mail may breach their acceptable-use or data
 protection policy regardless of how the allowlist is set. Use it on mail you own.
 
+## Logs and cost
+
+Everything printed is mirrored to `logs/agent.log`, five rotating files of two
+megabytes. A background watcher outlives the terminal it was started from, and
+the run worth reading is always the one that already scrolled away. Uncaught
+errors and failed watch cycles write their full traceback there, which is the
+only thing that makes an intermittent COM fault diagnosable after the fact.
+
+The log holds mail subjects, client names and message bodies, so it is
+privileged material and `logs/` is git-ignored along with `clients/`.
+
+On Windows PowerShell, read it with an explicit encoding or the Hebrew will look
+like mojibake, because `Get-Content` defaults to the system code page:
+
+```powershell
+Get-Content logs\agent.log -Tail 40 -Encoding UTF8
+```
+
+Spend is recorded per draft in `logs/usage.jsonl`, one JSON object per line,
+appended and never rewritten, so a run killed mid-draft cannot corrupt earlier
+records.
+
+```bash
+python -m rotem_agent.cli usage                  # last 30 days, draft by draft
+python -m rotem_agent.cli usage --by matter      # spend per client
+python -m rotem_agent.cli usage --by day --days -1
+```
+
+Three things make the total honest, each of which was wrong or missing at first:
+
+A draft is two model calls, not one. The asks are extracted before the reply is
+written, so the meter wraps the client rather than sitting at either call site,
+and counts whatever passes through it.
+
+Reasoning tokens are billed at the output rate but reported separately by the
+API. On this model they routinely exceed the visible reply, so counting only the
+visible output understated the bill roughly fourfold.
+
+Tokens are stored and money is worked out on read, from `config/pricing.yaml`.
+Prices are typed in by hand and go stale, so correcting that file reprices every
+draft ever recorded. A model with no price on file reports its tokens with the
+cost marked unknown rather than assuming a rate, because a plausible wrong
+figure is worse than no figure when it may reach a client bill.
+
+Cached input is charged at the cache rate where one is configured; with no cache
+rate it is charged in full, which overstates rather than flatters. Embedding
+calls are not metered at all, which is an omission rather than a zero: each
+draft embeds one short query, and indexing a matter embeds it once.
+
+The current model's introductory rate ends on 31 December 2026, after which
+Google's published standard rate doubles it. `config/pricing.yaml` says so, in
+the place you would look when the totals jump.
+
 ## Source policy
 
 The firm's intake skill requires an official source for any legal or procedural
@@ -289,6 +342,9 @@ This repository must never contain privileged material.
   Git-ignored; copy from `config/mailbox.example.yaml`.
 - `config/matters.yaml` — the folder holding client matters. Git-ignored; point it
   outside the repository in production.
+- `config/pricing.yaml` — model prices per million tokens, typed in by hand and
+  applied when the usage log is read. Also where a shekel exchange rate goes, if
+  you want totals in both currencies.
 - `GEMINI_EMBED_MODEL` — defaults to `gemini-embedding-001`, chosen because it
   returns one vector per input. `gemini-embedding-2` accepts a batch and returns
   a single vector without erroring, so the count is verified and the batch redone
@@ -334,3 +390,7 @@ This repository must never contain privileged material.
   excerpts influence triage and not only wording.
 - Nothing summarises a document as a whole. Retrieval returns passages, so a
   question answered only by reading an entire file will not be answered well.
+- Cost figures depend on prices maintained by hand in `config/pricing.yaml`, and
+  embedding calls are not metered at all, so a total is an estimate rather than a
+  bill. Check it against the real Google Cloud billing console before charging
+  anything to a client.

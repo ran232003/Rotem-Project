@@ -20,6 +20,16 @@ class LlmError(RuntimeError):
 class LlmUsage:
     input_tokens: int | None = None
     output_tokens: int | None = None
+    # Reasoning tokens are billed at the output rate but reported separately by
+    # the API, so a cost built on output alone understates a thinking model.
+    thinking_tokens: int | None = None
+    # A subset of input_tokens served from cache, billed at a tenth of the input
+    # rate. Counting them at full price would overstate every repeated prompt.
+    cached_tokens: int | None = None
+
+    @property
+    def billed_output_tokens(self) -> int:
+        return (self.output_tokens or 0) + (self.thinking_tokens or 0)
 
 
 @dataclass(frozen=True)

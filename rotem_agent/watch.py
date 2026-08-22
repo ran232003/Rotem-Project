@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Iterable, Sequence
 
+from rotem_agent.logs import logger
 from rotem_agent.outlook.com import FoundMessage, OutlookMailbox
 from rotem_agent.state import DraftLedger, LedgerEntry, message_key, utc_now
 
@@ -162,7 +163,10 @@ def watch(
                 )
             )
         except Exception as exc:  # Outlook restarts and transient COM faults
+            # The console gets the one-line version; the log gets the traceback,
+            # which is the only thing that makes a COM fault diagnosable later.
             log(f"  cycle failed: {exc}")
+            logger().exception("watch cycle %s failed", cycle)
             box.connect()
         if max_cycles is not None and cycle >= max_cycles:
             break

@@ -7,6 +7,10 @@ state/
 
 # Client documents. Privileged material must never reach version control.
 clients/
+
+# The transcript mirrors everything printed, which includes client names, mail
+# subjects and message bodies, so it is privileged material too.
+logs/
 __pycache__/
 *.py[cod]
 .pytest_cache/

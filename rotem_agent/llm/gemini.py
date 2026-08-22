@@ -54,4 +54,6 @@ def _usage(response: Any) -> LlmUsage | None:
     return LlmUsage(
         input_tokens=getattr(metadata, "prompt_token_count", None),
         output_tokens=getattr(metadata, "candidates_token_count", None),
+        thinking_tokens=getattr(metadata, "thoughts_token_count", None),
+        cached_tokens=getattr(metadata, "cached_content_token_count", None),
     )

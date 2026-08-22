@@ -7,6 +7,7 @@ import re
 import sys
 from pathlib import Path
 
+from rotem_agent import logs, usage
 from rotem_agent.analysis.questions import extract_asks
 from rotem_agent.attachments import excerpts_from_files, safe_filename, save_eml_attachments
 from rotem_agent.config import OUT_DIR, ConfigError, load_settings
@@ -15,6 +16,7 @@ from rotem_agent.llm.gemini import GeminiClient
 from rotem_agent.mailparse.parser import ParsedEmail, parse_eml
 from rotem_agent.matters import MatterRegistry, load_matters_root
 from rotem_agent.outlook import OutlookError, OutlookMailbox, load_mailbox_config
+from rotem_agent.pricing import format_money, format_usd, load_prices
 from rotem_agent.retrieval import ChunkStore, GeminiEmbedder, ingest_matter, search
 from rotem_agent.skill import load_skill
 from rotem_agent.state import ConversationMatters, DraftLedger
@@ -108,6 +110,18 @@ def main(argv: list[str] | None = None) -> int:
     ledger_cmd = sub.add_parser("ledger", help="Inspect what the agent has already drafted")
     ledger_cmd.add_argument("--forget", metavar="KEY", default=None)
 
+    usage_cmd = sub.add_parser("usage", help="Tokens spent and what they cost")
+    usage_cmd.add_argument(
+        "--days", type=int, default=30, help="How far back to look. -1 for everything."
+    )
+    usage_cmd.add_argument(
+        "--by",
+        choices=("day", "model", "matter", "sender"),
+        default=None,
+        help="Group the totals instead of listing every draft",
+    )
+    usage_cmd.add_argument("--limit", type=int, default=20, help="Drafts to list")
+
     sub.add_parser("matters", help="List client matters and their indexed documents")
 
     new_cmd = sub.add_parser("matter-new", help="Scaffold a folder for a new matter")
@@ -145,6 +159,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
+    log_path = logs.setup(" ".join(argv if argv is not None else sys.argv[1:]))
     try:
         if args.command == "parse":
             return _run_parse(args.eml)
@@ -156,6 +171,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_outlook_watch(args)
         if args.command == "ledger":
             return _run_ledger(args)
+        if args.command == "usage":
+            return _run_usage(args)
         if args.command == "matters":
             return _run_matters()
         if args.command == "matter-new":
@@ -169,7 +186,13 @@ def main(argv: list[str] | None = None) -> int:
         return _run_draft(args)
     except (ConfigError, OutlookError) as exc:
         print(f"\nError: {exc}", file=sys.stderr)
+        print(f"Details in {log_path}", file=sys.stderr)
         return 2
+    except Exception:
+        # The traceback belongs in the log, not only on a console that may have
+        # been closed hours ago.
+        logs.logger().exception("unhandled error running %s", args.command)
+        raise
 
 
 def _run_parse(path: Path) -> int:
@@ -193,13 +216,14 @@ def _run_draft(args) -> int:
 
     excerpts: list = []
     attachments: list = []
+    matter = ""
     if not args.no_files:
-        excerpts = _retrieve(email, args.matter, no_embed=args.no_embed)
+        excerpts, matter = _retrieve(email, args.matter, no_embed=args.no_embed)
         saved = save_eml_attachments(args.eml, args.out / "attachments")
         attachments = _read_attachments(saved, email)
 
     report = _compose(email, args.model, args.source_policy, excerpts, attachments)
-    _emit(report, args.out)
+    _emit(report, args.out, command="draft", sender=email.from_, matter=matter)
     return 0 if report.ok else 1
 
 
@@ -241,7 +265,15 @@ def _read_attachments(paths: list[Path], email: ParsedEmail) -> list:
     return excerpts
 
 
-def _emit(report, out_dir: Path) -> None:
+def _emit(
+    report,
+    out_dir: Path,
+    *,
+    command: str = "draft",
+    sender: str = "",
+    matter: str = "",
+    key: str = "",
+) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "draft.txt").write_text(report.draft_text, encoding="utf-8")
     (out_dir / "draft.html").write_text(render_draft_html(report), encoding="utf-8")
@@ -279,10 +311,40 @@ def _emit(report, out_dir: Path) -> None:
         print("\nPlaceholders left for the lawyer:")
         for item in report.placeholders:
             print(f"  - {item}")
-    if report.usage:
-        print(f"\nTokens: in={report.usage.input_tokens} out={report.usage.output_tokens}")
+    record = usage.from_report(
+        report,
+        command=command,
+        sender=sender,
+        subject=report.subject,
+        matter=matter,
+        key=key,
+    )
+    usage.UsageLog().record(record)
+    _print_cost(record)
 
     print(f"\nWrote {out_dir / 'draft.html'} and {out_dir / 'internal_note.md'}")
+
+
+def _print_cost(record: usage.UsageRecord) -> None:
+    if not record.input_tokens and not record.output_tokens:
+        return
+    prices = load_prices()
+    thinking = f" +{record.thinking_tokens} thinking" if record.thinking_tokens else ""
+    cached = f" ({record.cached_tokens} cached)" if record.cached_tokens else ""
+    cost = record.cost_usd(prices)
+    print(
+        f"\nTokens: in={record.input_tokens}{cached} out={record.output_tokens}{thinking}"
+        f"  ({record.seconds}s)  {format_money(prices, cost)}"
+    )
+    print(
+        "  "
+        + " | ".join(
+            f"{call.get('purpose')} {call.get('in')} in / {call.get('out')} out"
+            for call in record.calls
+        )
+    )
+    if cost is None:
+        print(f"  Add a price for {record.model} to config/pricing.yaml to cost this.")
 
 
 def _embedder(disabled: bool):
@@ -400,24 +462,26 @@ def _retrieve(
     conversation_id: str | None = None,
     no_embed: bool = False,
     top_k: int = 6,
-) -> list:
+) -> tuple[list, str]:
     """Find passages in the client's file that bear on this email.
 
-    Returns an empty list rather than raising when no matter can be identified:
-    a draft written from the thread alone is the current behaviour and is safe,
-    whereas guessing a matter would mix one client's papers into another's reply.
+    Returns the passages and the matter they came from, the latter so spend can
+    be attributed to a client. No excerpts rather than an error when no matter
+    can be identified: a draft written from the thread alone is the current
+    behaviour and is safe, whereas guessing a matter would mix one client's
+    papers into another's reply.
     """
     try:
         registry = MatterRegistry.discover()
     except ConfigError as exc:
         print(f"Client files not configured, drafting from the thread alone. ({exc})")
-        return []
+        return [], ""
 
     if matter_slug:
         matter = registry.by_slug(matter_slug)
         if matter is None:
             print(f"No matter with slug {matter_slug}", file=sys.stderr)
-            return []
+            return [], ""
     else:
         memory = ConversationMatters()
         resolution = registry.resolve(
@@ -430,7 +494,7 @@ def _retrieve(
                 print(f"  candidate: {candidate.slug}")
             if resolution.ambiguous:
                 print("  pass --matter <slug> to choose.")
-            return []
+            return [], ""
         matter = resolution.matter
         memory.remember(conversation_id, matter.slug)
         print(f"Matter: {matter.slug} ({resolution.reason})")
@@ -441,7 +505,7 @@ def _retrieve(
     print(f"Retrieved {len(hits)} excerpt(s) from {matter.slug}")
     for hit in hits:
         print(f"  {hit.citation}  ({hit.found_by})")
-    return hits
+    return hits, matter.slug
 
 
 def _mailbox() -> "OutlookMailbox":
@@ -487,8 +551,9 @@ def _run_outlook_draft(args) -> int:
 
     excerpts: list = []
     attachments: list = []
+    matter = ""
     if not args.no_files:
-        excerpts = _retrieve(
+        excerpts, matter = _retrieve(
             email,
             args.matter,
             conversation_id=found.conversation_id,
@@ -498,7 +563,14 @@ def _run_outlook_draft(args) -> int:
         attachments = _read_attachments(saved, email)
 
     report = _compose(email, args.model, args.source_policy, excerpts, attachments)
-    _emit(report, args.out)
+    _emit(
+        report,
+        args.out,
+        command="outlook-draft",
+        sender=found.sender,
+        matter=matter,
+        key=found.message_id or "",
+    )
 
     if args.save:
         box.create_reply_draft(found.item, report.draft_text, save=True)
@@ -532,16 +604,29 @@ def _run_outlook_watch(args) -> int:
     print(f"Ledger holds {len(ledger)} answered message(s) at {ledger.path}")
     if not args.save:
         print("Dry run: no drafts will be written. Pass --save to create them.")
+    # Which matter the last retrieval resolved to, so the spend can be
+    # attributed to a client. Retrieval and emission are separate callbacks in
+    # the loop, so the slug is carried between them here.
+    resolved_matter = {"slug": ""}
+
     def emitter(report, match):
         """One folder per answered message, so the note survives the next run."""
         stamp = re.sub(r"\D", "", str(match.received or ""))[:14] or "unknown"
         slug = safe_filename(match.subject or "message")[:60].rstrip(". ") or "message"
-        _emit(report, OUT_DIR / "drafts" / f"{stamp}-{slug}")
+        _emit(
+            report,
+            OUT_DIR / "drafts" / f"{stamp}-{slug}",
+            command="outlook-watch",
+            sender=match.sender,
+            matter=resolved_matter["slug"],
+            key=match.message_id or "",
+        )
 
     def retriever(email, match):
-        excerpts = _retrieve(
+        excerpts, matter = _retrieve(
             email, None, conversation_id=match.conversation_id, no_embed=args.no_embed
         )
+        resolved_matter["slug"] = matter
         saved = box.save_attachments(match.item, OUT_DIR / "attachments")
         return excerpts, _read_attachments(saved, email)
 
@@ -592,11 +677,72 @@ def _run_ledger(args) -> int:
     return 0
 
 
+def _run_usage(args) -> int:
+    log = usage.UsageLog()
+    prices = load_prices()
+    records = log.read(since=usage.cutoff(args.days))
+    if not records:
+        window = "ever" if args.days < 0 else f"in the last {args.days} day(s)"
+        print(f"No drafts recorded {window} in {log.path}")
+        return 0
+
+    print(f"Usage from {log.path}")
+    print(f"Prices from {prices.source or 'config/pricing.yaml'}\n")
+
+    if args.by:
+        rows = []
+        for name, group in usage.group(records, args.by).items():
+            rows.append((name, usage.totals(group, prices)))
+        rows.sort(key=lambda row: row[1].cost_usd, reverse=True)
+        width = max(len(name) for name, _ in rows)
+        for name, group_totals in rows:
+            print(
+                f"  {name:<{width}}  {group_totals.drafts:>3} draft(s)  "
+                f"in {group_totals.input_tokens:>8,}  "
+                f"out {group_totals.billed_output_tokens:>8,}  "
+                f"{format_usd(group_totals.cost_usd)}"
+                + (f"  ({group_totals.unpriced} unpriced)" if group_totals.unpriced else "")
+            )
+    else:
+        for record in sorted(records, key=lambda r: r.at, reverse=True)[: args.limit]:
+            flag = "" if record.ok else "  PROBLEMS"
+            print(
+                f"  {record.at[:16].replace('T', ' ')}  {record.model}  "
+                f"{record.matter or '(no matter)'}  "
+                f"in {record.input_tokens:,}  out {record.billed_output_tokens:,}  "
+                f"{record.seconds}s  {format_usd(record.cost_usd(prices))}{flag}"
+            )
+            print(f"      {record.subject[:70]}")
+
+    grand = usage.totals(records, prices)
+    thinking = (
+        f" (incl. {grand.thinking_tokens:,} reasoning)" if grand.thinking_tokens else ""
+    )
+    print(f"\n{grand.drafts} draft(s)")
+    print(f"  input   {grand.input_tokens:>10,} tokens")
+    print(f"  output  {grand.billed_output_tokens:>10,} tokens{thinking}")
+    print(f"  time    {grand.seconds:>10.1f} s")
+    average = grand.average_usd
+    print(
+        f"  cost    {format_money(prices, grand.cost_usd):>10}"
+        + (f"   average {format_usd(average)} per draft" if average is not None else "")
+    )
+    if grand.unpriced:
+        missing = sorted({r.model for r in records if r.cost_usd(prices) is None})
+        print(
+            f"\n{grand.unpriced} draft(s) are not costed because no price is on file for: "
+            + ", ".join(missing)
+        )
+        print("  Add them to config/pricing.yaml and run this again; nothing is lost,")
+        print("  because the log stores tokens and the cost is worked out on read.")
+    return 0
+
+
 def _run_outlook_demo(args) -> int:
     email = parse_eml(args.eml)
     _print_summary(email)
     report = _compose(email, args.model, args.source_policy)
-    _emit(report, args.out)
+    _emit(report, args.out, command="outlook-demo", sender=email.from_)
 
     box = _mailbox()
     subject = f"[AI draft] {email.subject}"

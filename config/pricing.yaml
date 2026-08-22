@@ -1,0 +1,44 @@
+# Model prices, in US dollars per one million tokens.
+#
+# THESE NUMBERS ARE TYPED IN BY HAND and go stale. Check them against
+# https://ai.google.dev/gemini-api/docs/pricing before you rely on a total.
+#
+# Correcting a number here is safe and retroactive: the usage log stores token
+# counts, not amounts, so every past draft is repriced the next time you run
+#   python -m rotem_agent.cli usage
+#
+# A model left null, or absent entirely, reports its tokens with the cost marked
+# unknown. That is deliberate. A default rate would turn a guess into a figure
+# that looks authoritative, and this number may end up on a client bill.
+#
+# output covers reasoning tokens as well as the visible reply, which is how
+# Google bills it. On this model the reasoning is usually the larger half.
+# cached_input applies to the part of a prompt served from cache.
+
+models:
+  # Checked 22 Aug 2026 against the pricing page. Introductory rate.
+  #
+  # WATCH THIS: the introductory rate ends on 31 December 2026, after which
+  # Google's published standard rate is $1.50 in / $7.50 out, so every draft
+  # doubles in cost overnight. Update these two lines in January.
+  gemini-3.6-flash:
+    input: 0.75
+    output: 3.75
+    cached_input: 0.075
+
+  # Kept for comparison if you switch models. Verify before trusting.
+  gemini-2.5-flash:
+    input: 0.30
+    output: 2.50
+
+  gemini-2.5-pro:
+    input: 1.25
+    output: 10.00
+
+# Embedding calls are not metered. Each draft embeds one short query and
+# indexing a matter embeds it once, so the omission is small next to a five
+# thousand token prompt, but it is an omission rather than a zero.
+
+# Set an exchange rate to also show shekels. Left unset, only dollars are shown,
+# because a stale rate is another invented number.
+usd_to_ils: null

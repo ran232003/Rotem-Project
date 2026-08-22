@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -9,6 +10,7 @@ from rotem_agent.analysis.questions import AskSet, extract_asks
 from rotem_agent.config import Firm, GlossaryTerm, load_firm, load_glossary
 from rotem_agent.drafting.prompt import DRAFT_SCHEMA, build_system_prompt, build_user_prompt
 from rotem_agent.llm.base import LlmClient, LlmUsage
+from rotem_agent.llm.metering import CallRecord, MeteredClient
 from rotem_agent.mailparse.parser import ParsedEmail
 from rotem_agent.mailparse.quotes import QuotedMessage
 from rotem_agent.skill import Skill, load_skill
@@ -80,6 +82,8 @@ class DraftReport:
     problems: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     usage: LlmUsage | None = None
+    calls: list[CallRecord] = field(default_factory=list)
+    seconds: float = 0.0
 
     @property
     def ok(self) -> bool:
@@ -102,10 +106,15 @@ def compose(
     excerpts = excerpts or []
     attachment_excerpts = attachment_excerpts or []
 
-    asks = extract_asks(email.latest_body, llm)
+    # Metering here rather than at the call site, so every model call a draft
+    # makes is counted even when the caller passes a plain client.
+    meter = MeteredClient(llm)
+    started = time.perf_counter()
+
+    asks = extract_asks(email.latest_body, meter.labelled("asks"))
     style_examples = _style_examples(email.quoted_chain, firm)
 
-    response = llm.complete_json(
+    response = meter.labelled("draft").complete_json(
         system=build_system_prompt(firm, glossary, skill, source_policy),
         user=build_user_prompt(email, asks, style_examples, excerpts, attachment_excerpts),
         schema=DRAFT_SCHEMA,
@@ -152,7 +161,9 @@ def compose(
         source_policy=source_policy,
         problems=problems,
         warnings=warnings,
-        usage=response.usage,
+        usage=meter.usage,
+        calls=list(meter.calls),
+        seconds=round(time.perf_counter() - started, 2),
     )
 
 
