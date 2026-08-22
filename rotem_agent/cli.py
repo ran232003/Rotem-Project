@@ -13,6 +13,7 @@ from rotem_agent.attachments import excerpts_from_files, safe_filename, save_eml
 from rotem_agent.config import OUT_DIR, ConfigError, load_settings
 from rotem_agent.drafting.composer import compose, render_draft_html, render_internal_note
 from rotem_agent.llm.gemini import GeminiClient
+from rotem_agent.lock import AlreadyRunning, SingleInstance
 from rotem_agent.mailparse.parser import ParsedEmail, parse_eml
 from rotem_agent.matters import MatterRegistry, load_matters_root
 from rotem_agent.outlook import OutlookError, OutlookMailbox, load_mailbox_config
@@ -581,6 +582,28 @@ def _run_outlook_draft(args) -> int:
 
 
 def _run_outlook_watch(args) -> int:
+    # Before Outlook is touched, so a second watcher is turned away rather than
+    # racing the first one to draft the same message.
+    guard = SingleInstance("watch")
+    try:
+        guard.acquire()
+    except AlreadyRunning as exc:
+        print(f"\n{exc}", file=sys.stderr)
+        print(
+            "Stop the running one first. On Windows, closing its terminal is not "
+            "enough:\n"
+            "  Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" |\n"
+            "    Where-Object CommandLine -like '*rotem_agent*'",
+            file=sys.stderr,
+        )
+        return 3
+    try:
+        return _watch_loop(args)
+    finally:
+        guard.release()
+
+
+def _watch_loop(args) -> int:
     config = load_mailbox_config()
     senders = args.sender or config.allowed_senders
     unknown = [s for s in senders if not config.allows(s)]

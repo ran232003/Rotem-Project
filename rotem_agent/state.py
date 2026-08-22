@@ -53,6 +53,16 @@ class DraftLedger:
         self._entries: dict[str, dict] = {}
         self._load()
 
+    def reload(self) -> None:
+        """Pick up writes made since this object was built.
+
+        A long-running watcher would otherwise answer from a snapshot taken at
+        startup, so `ledger --forget` would appear to do nothing until restart,
+        and a second process's records would be invisible.
+        """
+        self._entries = {}
+        self._load()
+
     def _load(self) -> None:
         if not self.path.exists():
             return

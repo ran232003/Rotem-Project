@@ -82,6 +82,7 @@ def run_cycle(
     emit_fn: Callable[[object, FoundMessage], None] | None = None,
 ) -> list[LedgerEntry]:
     """One pass: find unanswered mail from the allowed senders and draft it."""
+    ledger.reload()
     matches: list[FoundMessage] = []
     for sender in senders:
         matches.extend(box.messages_from(sender, limit=50))
