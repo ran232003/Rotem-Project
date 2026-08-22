@@ -278,6 +278,16 @@ def _verify(
             "confirm authorisation before any case detail goes out."
         )
 
+    # Answering a stranger's legal question in detail creates an expectation of
+    # representation before any engagement letter or conflict check exists. The
+    # skill is an intake workflow, so this is flagged for the lawyer rather than
+    # blocked, but it must not pass silently.
+    if internal.client_type == "potential_client" and not internal.is_holding_reply:
+        warnings.append(
+            "Substantive advice to a potential client: no engagement letter or "
+            "conflict check is on record. Confirm the retainer before sending."
+        )
+
     if len(internal.missing_facts) > 5:
         warnings.append(
             f"{len(internal.missing_facts)} missing facts listed; the skill allows two to five."

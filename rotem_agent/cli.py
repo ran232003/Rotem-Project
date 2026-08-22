@@ -3,11 +3,12 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import re
 import sys
 from pathlib import Path
 
 from rotem_agent.analysis.questions import extract_asks
-from rotem_agent.attachments import excerpts_from_files, save_eml_attachments
+from rotem_agent.attachments import excerpts_from_files, safe_filename, save_eml_attachments
 from rotem_agent.config import OUT_DIR, ConfigError, load_settings
 from rotem_agent.drafting.composer import compose, render_draft_html, render_internal_note
 from rotem_agent.llm.gemini import GeminiClient
@@ -531,6 +532,12 @@ def _run_outlook_watch(args) -> int:
     print(f"Ledger holds {len(ledger)} answered message(s) at {ledger.path}")
     if not args.save:
         print("Dry run: no drafts will be written. Pass --save to create them.")
+    def emitter(report, match):
+        """One folder per answered message, so the note survives the next run."""
+        stamp = re.sub(r"\D", "", str(match.received or ""))[:14] or "unknown"
+        slug = safe_filename(match.subject or "message")[:60].rstrip(". ") or "message"
+        _emit(report, OUT_DIR / "drafts" / f"{stamp}-{slug}")
+
     def retriever(email, match):
         excerpts = _retrieve(
             email, None, conversation_id=match.conversation_id, no_embed=args.no_embed
@@ -541,12 +548,20 @@ def _run_outlook_watch(args) -> int:
     if args.no_files:
         retriever = None
     if args.once:
-        created = len(run_cycle(box, ledger, senders, drafter, options, print, retriever))
+        created = len(
+            run_cycle(box, ledger, senders, drafter, options, print, retriever, emitter)
+        )
     else:
         print(f"Polling every {args.interval}s. Press Ctrl+C to stop.")
         try:
             created = watch(
-                box, ledger, senders, drafter, options, retrieve_fn=retriever
+                box,
+                ledger,
+                senders,
+                drafter,
+                options,
+                retrieve_fn=retriever,
+                emit_fn=emitter,
             )
         except KeyboardInterrupt:
             print("\nStopped.")

@@ -78,6 +78,7 @@ def run_cycle(
     options: WatchOptions,
     log: Callable[[str], None] = print,
     retrieve_fn: Callable[[object, FoundMessage], tuple[list, list]] | None = None,
+    emit_fn: Callable[[object, FoundMessage], None] | None = None,
 ) -> list[LedgerEntry]:
     """One pass: find unanswered mail from the allowed senders and draft it."""
     matches: list[FoundMessage] = []
@@ -101,6 +102,11 @@ def run_cycle(
         email = box.to_parsed_email(match.item)
         excerpts, attachments = retrieve_fn(email, match) if retrieve_fn else ([], [])
         report = draft_fn(email, excerpts, attachments)
+        # The internal note carries the warnings, unverified claims and approval
+        # level. Writing a draft into the mailbox while discarding the analysis
+        # would leave the reviewer with nothing to review against.
+        if emit_fn:
+            emit_fn(report, match)
 
         draft_entry_id = None
         if options.save:
@@ -142,6 +148,7 @@ def watch(
     sleep: Callable[[float], None] = time.sleep,
     max_cycles: int | None = None,
     retrieve_fn: Callable[[object, FoundMessage], tuple[list, list]] | None = None,
+    emit_fn: Callable[[object, FoundMessage], None] | None = None,
 ) -> int:
     """Poll until interrupted. Returns the number of drafts created."""
     total = 0
@@ -150,7 +157,9 @@ def watch(
         cycle += 1
         try:
             total += len(
-                run_cycle(box, ledger, senders, draft_fn, options, log, retrieve_fn)
+                run_cycle(
+                    box, ledger, senders, draft_fn, options, log, retrieve_fn, emit_fn
+                )
             )
         except Exception as exc:  # Outlook restarts and transient COM faults
             log(f"  cycle failed: {exc}")

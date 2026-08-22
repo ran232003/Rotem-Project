@@ -183,6 +183,12 @@ python -m rotem_agent.cli outlook-watch --save           # poll every 60s
 python -m rotem_agent.cli ledger                         # what has been answered
 ```
 
+Each answered message gets a folder under `out/drafts/`, holding the draft and
+the internal note. Writing a draft into the mailbox while discarding the analysis
+would leave the reviewer with nothing to review against, since the warnings, the
+unverified claims and the approval level all live in the note rather than in the
+draft.
+
 Each drafted message is recorded in `state/ledger.json`, keyed by its Internet
 Message-ID, so a message is answered exactly once no matter how often the loop
 runs. The key is per message rather than per thread, so a genuine follow-up in a

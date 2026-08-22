@@ -61,6 +61,46 @@ class _Excerpt:
         self.text = text
 
 
+def test_substantive_advice_to_a_potential_client_is_flagged():
+    """Detailed advice before an engagement letter creates an expectation of representation."""
+    _, warnings = _verify(
+        "שלום רב, לפי המכתב עליך להשלים את הרישום עד למועד הנקוב שם ולהגיש השגה.",
+        [Answer(ask="a", answered=True, excerpt="x")],
+        _asks("a"),
+        _email("שאלה ארוכה דיה כדי לזהות שפה עברית בהודעה הנכנסת הזו"),
+        _note(client_type="potential_client"),
+        "advisory",
+        FIRM,
+    )
+    assert any("engagement letter" in w for w in warnings)
+
+
+def test_a_holding_reply_to_a_potential_client_is_not_flagged():
+    _, warnings = _verify(
+        "שלום רב, קיבלנו את פנייתך ונחזור אליך בהקדם לאחר בדיקה מסודרת של העניין.",
+        [Answer(ask="a", answered=False, excerpt="")],
+        _asks("a"),
+        _email("שאלה ארוכה דיה כדי לזהות שפה עברית בהודעה הנכנסת הזו"),
+        _note(client_type="potential_client", is_holding_reply=True),
+        "advisory",
+        FIRM,
+    )
+    assert not any("engagement letter" in w for w in warnings)
+
+
+def test_an_existing_client_is_not_flagged_for_engagement():
+    _, warnings = _verify(
+        "שלום רב, לפי המכתב עליך להשלים את הרישום עד למועד הנקוב שם ולהגיש השגה.",
+        [Answer(ask="a", answered=True, excerpt="x")],
+        _asks("a"),
+        _email("שאלה ארוכה דיה כדי לזהות שפה עברית בהודעה הנכנסת הזו"),
+        _note(client_type="existing_client"),
+        "advisory",
+        FIRM,
+    )
+    assert not any("engagement letter" in w for w in warnings)
+
+
 def test_a_fabricated_document_citation_is_a_problem():
     """The model must not claim to have read a file it was never shown."""
     problems, _ = _verify(
