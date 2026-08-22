@@ -13,6 +13,8 @@ from rotem_agent.llm.gemini import GeminiClient
 from rotem_agent.mailparse.parser import ParsedEmail, parse_eml
 from rotem_agent.outlook import OutlookError, OutlookMailbox, load_mailbox_config
 from rotem_agent.skill import load_skill
+from rotem_agent.state import DraftLedger
+from rotem_agent.watch import WatchOptions, run_cycle, watch
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -59,6 +61,39 @@ def main(argv: list[str] | None = None) -> int:
         "--source-policy", choices=("strict", "advisory"), default="advisory"
     )
 
+    watch_cmd = sub.add_parser(
+        "outlook-watch",
+        help="Poll Outlook and draft a reply to each new message, once per message",
+    )
+    watch_cmd.add_argument(
+        "--sender",
+        action="append",
+        default=None,
+        help="Repeatable. Defaults to every address in allowed_senders.",
+    )
+    watch_cmd.add_argument("--interval", type=int, default=60, help="Seconds between polls")
+    watch_cmd.add_argument(
+        "--backlog-days",
+        type=int,
+        default=7,
+        help="Ignore mail older than this on first run. -1 means no limit.",
+    )
+    watch_cmd.add_argument("--max-per-cycle", type=int, default=5)
+    watch_cmd.add_argument("--once", action="store_true", help="Run a single pass and exit")
+    watch_cmd.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-draft messages already in the ledger",
+    )
+    watch_cmd.add_argument("--save", action="store_true")
+    watch_cmd.add_argument("--model", default=None)
+    watch_cmd.add_argument(
+        "--source-policy", choices=("strict", "advisory"), default="advisory"
+    )
+
+    ledger_cmd = sub.add_parser("ledger", help="Inspect what the agent has already drafted")
+    ledger_cmd.add_argument("--forget", metavar="KEY", default=None)
+
     demo_cmd = sub.add_parser(
         "outlook-demo",
         help="Draft from a local .eml and place it in Outlook as a new mail to --to",
@@ -80,6 +115,10 @@ def main(argv: list[str] | None = None) -> int:
             return _run_outlook_scan(args.sender, args.limit)
         if args.command == "outlook-draft":
             return _run_outlook_draft(args)
+        if args.command == "outlook-watch":
+            return _run_outlook_watch(args)
+        if args.command == "ledger":
+            return _run_ledger(args)
         if args.command == "outlook-demo":
             return _run_outlook_demo(args)
         return _run_draft(args.eml, args.model, args.out, args.source_policy)
@@ -111,11 +150,17 @@ def _run_draft(path: Path, model: str | None, out_dir: Path, source_policy: str)
     return 0 if report.ok else 1
 
 
-def _compose(email: ParsedEmail, model: str | None, source_policy: str):
+def _make_drafter(model: str | None, source_policy: str):
+    """Build the drafting callable once; the watch loop reuses it every cycle."""
     settings = load_settings()
     client = GeminiClient(api_key=settings.gemini_api_key, model=model or settings.model)
+    skill = load_skill()
     print(f"\nDrafting with {client.model}, source policy '{source_policy}' ...")
-    return compose(email, client, skill=load_skill(), source_policy=source_policy)
+    return lambda email: compose(email, client, skill=skill, source_policy=source_policy)
+
+
+def _compose(email: ParsedEmail, model: str | None, source_policy: str):
+    return _make_drafter(model, source_policy)(email)
 
 
 def _emit(report, out_dir: Path) -> None:
@@ -212,6 +257,65 @@ def _run_outlook_draft(args) -> int:
     else:
         print("\nDry run. Pass --save to place this reply in your Outlook Drafts folder.")
     return 0 if report.ok else 1
+
+
+def _run_outlook_watch(args) -> int:
+    config = load_mailbox_config()
+    senders = args.sender or config.allowed_senders
+    unknown = [s for s in senders if not config.allows(s)]
+    if unknown:
+        print(f"Not in allowed_senders: {', '.join(unknown)}", file=sys.stderr)
+        return 2
+
+    box = _mailbox()
+    ledger = DraftLedger()
+    drafter = _make_drafter(args.model, args.source_policy)
+    options = WatchOptions(
+        save=args.save,
+        interval_seconds=args.interval,
+        backlog_days=args.backlog_days,
+        max_per_cycle=args.max_per_cycle,
+        source_policy=args.source_policy,
+        force=args.force,
+    )
+
+    print(f"Watching {', '.join(senders)}")
+    print(f"Ledger holds {len(ledger)} answered message(s) at {ledger.path}")
+    if not args.save:
+        print("Dry run: no drafts will be written. Pass --save to create them.")
+    if args.once:
+        created = len(run_cycle(box, ledger, senders, drafter, options))
+    else:
+        print(f"Polling every {args.interval}s. Press Ctrl+C to stop.")
+        try:
+            created = watch(box, ledger, senders, drafter, options)
+        except KeyboardInterrupt:
+            print("\nStopped.")
+            return 0
+    print(f"\nDrafted {created} repl{'y' if created == 1 else 'ies'}.")
+    return 0
+
+
+def _run_ledger(args) -> int:
+    ledger = DraftLedger()
+    if args.forget:
+        if ledger.forget(args.forget):
+            print(f"Forgot {args.forget}. It will be drafted again on the next pass.")
+            return 0
+        print(f"No ledger entry with key {args.forget}", file=sys.stderr)
+        return 1
+
+    entries = ledger.entries()
+    if not entries:
+        print(f"Ledger is empty ({ledger.path})")
+        return 0
+    print(f"{len(entries)} answered message(s) in {ledger.path}\n")
+    for entry in entries:
+        flag = "ok" if entry.get("ok") else "PROBLEMS"
+        print(f"  {entry.get('drafted_at')}  [{flag}]  {entry.get('sender')}")
+        print(f"    {entry.get('subject')}")
+        print(f"    key: {entry.get('key')}")
+    return 0
 
 
 def _run_outlook_demo(args) -> int:

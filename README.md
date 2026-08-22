@@ -75,6 +75,29 @@ Without `--save` it is a dry run that only writes to `out/`. With `--save` it
 creates a threaded reply in Drafts, categorised `AI draft` so machine-written
 drafts are obvious in the folder list.
 
+### Watching for new mail
+
+```bash
+python -m rotem_agent.cli outlook-watch --once           # one dry-run pass
+python -m rotem_agent.cli outlook-watch --save           # poll every 60s
+python -m rotem_agent.cli ledger                         # what has been answered
+```
+
+Each drafted message is recorded in `state/ledger.json`, keyed by its Internet
+Message-ID, so a message is answered exactly once no matter how often the loop
+runs. The key is per message rather than per thread, so a genuine follow-up in a
+thread already answered is still picked up. An Outlook EntryID would not do,
+because it changes when an item is filed into another folder and the message
+would look new again. The ledger is written only after the draft exists, so an
+interrupted run leaves the message pending rather than silently answered, and it
+doubles as the audit trail: model, source policy and verification result per
+message.
+
+`--backlog-days` (default 7) stops a first run against a mailbox with years of
+history from drafting a reply to everything; `--max-per-cycle` caps each pass.
+`ledger --forget <key>` makes one message eligible again, and `--force`
+re-drafts everything.
+
 To see how a draft renders without touching a real thread:
 
 ```bash
@@ -181,8 +204,8 @@ This repository must never contain privileged material.
 - Signature handling is incomplete. A draft that ends with a typed sign-off is
   flagged, because Outlook appends the real signature separately and the two
   would duplicate. The connector does not yet inject the firm signature.
-- The Outlook connector has no polling loop, no delta tracking and no record of
-  which messages it has already answered, so re-running it on the same thread
-  produces another draft.
+- Polling only runs while the command is running, and there is no delta
+  tracking: every cycle re-runs the sender restriction over the mailbox. That is
+  cheap at one allowlisted sender but will not scale to a whole mailbox.
 - Matter resolution and retrieval over client files are not implemented, so the
   only context is the email thread itself.

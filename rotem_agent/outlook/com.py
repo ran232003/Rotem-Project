@@ -85,6 +85,7 @@ class FoundMessage:
     subject: str
     sender: str
     conversation_id: str | None
+    message_id: str | None = None
 
 
 class OutlookMailbox:
@@ -146,6 +147,7 @@ class OutlookMailbox:
                         subject=str(_safe(lambda: item.Subject, "")),
                         sender=_sender_address(item) or "",
                         conversation_id=_safe(lambda: str(item.ConversationID), None),
+                        message_id=_prop(item, PR_INTERNET_MESSAGE_ID),
                     )
                 )
                 if len(found) >= limit:

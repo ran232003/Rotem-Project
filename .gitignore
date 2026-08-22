@@ -2,6 +2,7 @@
 out/
 samples/*.eml
 config/mailbox.yaml
+state/
 __pycache__/
 *.py[cod]
 .pytest_cache/
