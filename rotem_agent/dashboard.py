@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from rotem_agent import control, outcomes, stats
+from rotem_agent import control, outcomes, senders, stats
 from rotem_agent.config import PROJECT_ROOT
 from rotem_agent.pricing import load_prices
 from rotem_agent.state import DraftLedger
@@ -68,7 +68,27 @@ class Dashboard:
         }
         snapshot["refreshing"] = self._refreshing
         snapshot["at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        snapshot["senders"] = self.senders()
         return snapshot
+
+    def senders(self) -> list[str]:
+        """The allowlist, or an empty list if the file cannot be read.
+
+        A page that fails to load because of a malformed config would take the
+        off switch down with it, which is the one control that must keep working.
+        """
+        try:
+            return senders.read()
+        except senders.SenderError:
+            return []
+
+    def add_sender(self, address: str) -> dict:
+        senders.add(address)
+        return self.status()
+
+    def remove_sender(self, address: str) -> dict:
+        senders.remove(address)
+        return self.status()
 
     def start(self) -> dict:
         # Generous, because it returns the moment the lock is taken. A watcher
@@ -150,8 +170,40 @@ class _Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/refresh":
             self.dashboard.refresh_outcomes(force=True)
             self._send_json(self.dashboard.status())
+        elif self.path in ("/api/senders/add", "/api/senders/remove"):
+            self._edit_senders(add=self.path.endswith("add"))
         else:
             self.send_error(404)
+
+    def _edit_senders(self, *, add: bool) -> None:
+        """Editing the allowlist widens or narrows what the agent may read.
+
+        The refusals are reported as 400 with the reason, because every one of
+        them is something the person at the keyboard can correct: a typo, an
+        address already listed, or the last one being removed.
+        """
+        try:
+            address = str(self._body().get("address", ""))
+        except ValueError:
+            self.send_error(400, "malformed request")
+            return
+        try:
+            action = self.dashboard.add_sender if add else self.dashboard.remove_sender
+            self._send_json(action(address))
+        except senders.SenderError as exc:
+            self._send_json({"error": str(exc)}, status=400)
+
+    def _body(self) -> dict:
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0:
+            return {}
+        # Bounded because the only callers post one address.
+        raw = self.rfile.read(min(length, 4096))
+        try:
+            parsed = json.loads(raw.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ValueError("not JSON") from exc
+        return parsed if isinstance(parsed, dict) else {}
 
     def _same_origin(self) -> bool:
         """Refuse a POST driven by some other page open in the same browser.
@@ -178,9 +230,9 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_json(self, payload: dict) -> None:
+    def _send_json(self, payload: dict, status: int = 200) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")

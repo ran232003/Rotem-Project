@@ -17,6 +17,7 @@ from http.server import ThreadingHTTPServer
 import pytest
 
 from rotem_agent.dashboard import PAGE, _already_serving, _Handler, serve
+from rotem_agent.senders import SenderError
 
 
 class _Stub:
@@ -25,9 +26,26 @@ class _Stub:
         self.stopped = 0
         self.forced = 0
         self.refreshed = []
+        self.addresses = ["a@x.com"]
 
     def _payload(self):
-        return {"watcher": {"running": bool(self.started > self.stopped)}, "recent": []}
+        return {
+            "watcher": {"running": bool(self.started > self.stopped)},
+            "recent": [],
+            "senders": list(self.addresses),
+        }
+
+    def add_sender(self, address):
+        if address in self.addresses:
+            raise SenderError("כבר נמצאת ברשימה.")
+        self.addresses.append(address)
+        return self._payload()
+
+    def remove_sender(self, address):
+        if len(self.addresses) < 2:
+            raise SenderError("לא ניתן להסיר את הכתובת האחרונה.")
+        self.addresses.remove(address)
+        return self._payload()
 
     def status(self):
         return self._payload()
@@ -75,8 +93,9 @@ def _get(url):
         return response.status, response.read().decode("utf-8")
 
 
-def _post(url, origin=None):
-    request = urllib.request.Request(url, data=b"", method="POST")
+def _post(url, origin=None, payload=None):
+    data = b"" if payload is None else json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(url, data=data, method="POST")
     request.add_header("Content-Type", "application/json")
     if origin:
         request.add_header("Origin", origin)
@@ -158,6 +177,72 @@ def test_an_unknown_path_is_not_found(server):
     with pytest.raises(urllib.error.HTTPError) as caught:
         _get(base + "/secrets")
     assert caught.value.code == 404
+
+
+def test_the_allowlist_is_in_the_status(server):
+    base, _ = server
+    _, body = _get(base + "/api/status")
+    assert json.loads(body)["senders"] == ["a@x.com"]
+
+
+def test_an_address_can_be_added_from_the_page(server):
+    base, stub = server
+    status, body = _post(base + "/api/senders/add", payload={"address": "b@y.com"})
+    assert status == 200
+    assert json.loads(body)["senders"] == ["a@x.com", "b@y.com"]
+    assert stub.addresses == ["a@x.com", "b@y.com"]
+
+
+def test_an_address_can_be_removed_from_the_page(server):
+    base, stub = server
+    stub.addresses = ["a@x.com", "b@y.com"]
+    _, body = _post(base + "/api/senders/remove", payload={"address": "b@y.com"})
+    assert json.loads(body)["senders"] == ["a@x.com"]
+
+
+def test_a_refusal_comes_back_as_a_reason_not_a_crash(server):
+    base, stub = server
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        _post(base + "/api/senders/add", payload={"address": "a@x.com"})
+
+    assert caught.value.code == 400
+    assert "כבר" in json.loads(caught.value.read().decode("utf-8"))["error"]
+    assert stub.addresses == ["a@x.com"]
+
+
+def test_removing_the_last_address_is_refused_with_a_reason(server):
+    base, stub = server
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        _post(base + "/api/senders/remove", payload={"address": "a@x.com"})
+
+    assert caught.value.code == 400
+    assert "האחרונה" in json.loads(caught.value.read().decode("utf-8"))["error"]
+    assert stub.addresses == ["a@x.com"]
+
+
+def test_a_body_that_is_not_json_is_rejected(server):
+    base, stub = server
+    request = urllib.request.Request(
+        base + "/api/senders/add", data=b"not json at all", method="POST"
+    )
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        urllib.request.urlopen(request, timeout=10)
+
+    assert caught.value.code == 400
+    assert stub.addresses == ["a@x.com"]
+
+
+def test_another_site_cannot_widen_the_allowlist(server):
+    """The boundary is the point of the file; a page she has open must not move it."""
+    base, stub = server
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        _post(
+            base + "/api/senders/add",
+            origin="https://example.com",
+            payload={"address": "attacker@evil.com"},
+        )
+    assert caught.value.code == 403
+    assert stub.addresses == ["a@x.com"]
 
 
 def test_a_live_dashboard_is_recognised(server):

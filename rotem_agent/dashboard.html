@@ -208,6 +208,66 @@
         color: var(--muted);
         padding: 22px 4px;
       }
+
+      .hint {
+        color: var(--muted);
+        font-size: 13.5px;
+        margin: 0 0 14px;
+      }
+      .senders {
+        list-style: none;
+        margin: 0 0 14px;
+        padding: 0;
+      }
+      .senders li {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 9px 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .senders li:last-child {
+        border-bottom: none;
+      }
+      .senders .addr {
+        font-size: 14.5px;
+      }
+      .senders button {
+        margin-inline-start: auto;
+        padding: 5px 14px;
+        font-size: 13px;
+        font-weight: 500;
+        background: #fff;
+        color: var(--muted);
+        border-color: #cbd0d6;
+      }
+      .senders button:hover:not(:disabled) {
+        color: #b91c1c;
+        border-color: #fca5a5;
+      }
+      .addrow {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      .addrow input {
+        font: inherit;
+        flex: 1 1 260px;
+        min-width: 0;
+        padding: 10px 13px;
+        border: 1px solid #cbd0d6;
+        border-radius: 9px;
+        color: var(--ink);
+      }
+      .addrow input:focus {
+        outline: 2px solid var(--on);
+        outline-offset: -1px;
+      }
+      .err {
+        color: #b91c1c;
+        font-size: 13.5px;
+        margin-top: 12px;
+      }
       @media (max-width: 720px) {
         .cards {
           grid-template-columns: 1fr;
@@ -273,6 +333,27 @@
           </button>
           <span id="sentNote"></span>
         </div>
+      </div>
+
+      <div class="panel" style="margin-top: 14px">
+        <h2 style="margin: 0 0 6px; font-size: 15px">כתובות שהסוכן עונה להן</h2>
+        <p class="hint">
+          הסוכן קורא רק מיילים מהכתובות שברשימה הזאת, ואינו נוגע בשאר תיבת
+          הדואר. שינוי נכנס לתוקף בתוך דקה, בלי לכבות ולהפעיל מחדש.
+        </p>
+        <ul id="senders" class="senders"></ul>
+        <div class="addrow">
+          <input
+            id="newSender"
+            type="email"
+            dir="ltr"
+            placeholder="name@example.com"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <button id="addSender" class="secondary">הוספה</button>
+        </div>
+        <div id="senderError" class="err" hidden></div>
       </div>
 
       <div class="foot"><span id="note"></span></div>
@@ -414,7 +495,69 @@
             ? "נתוני שליחה נכונים ל־" + when(s.outcomes_refreshed_at)
             : "נתוני השליחה טרם נבדקו.";
 
+        paintSenders(s.senders || []);
+
         $("note").textContent = s.currency_note ? "" : "";
+      }
+
+      function paintSenders(list) {
+        const ul = $("senders");
+        ul.replaceChildren();
+        for (const address of list) {
+          const li = document.createElement("li");
+
+          const span = document.createElement("span");
+          span.className = "addr ltr";
+          span.textContent = address;
+          li.appendChild(span);
+
+          const remove = document.createElement("button");
+          remove.textContent = "הסרה";
+          // The last one cannot go: an empty list would leave the running agent
+          // on its previous list, so the page would disagree with what it reads.
+          remove.disabled = list.length < 2;
+          remove.title =
+            list.length < 2 ? "כדי שהסוכן יפסיק לענות, יש לכבות אותו." : "";
+          remove.addEventListener("click", () => {
+            if (confirm(`להסיר את ${address} מהרשימה?`)) {
+              editSenders("/api/senders/remove", address);
+            }
+          });
+          li.appendChild(remove);
+
+          ul.appendChild(li);
+        }
+      }
+
+      function senderError(text) {
+        const box = $("senderError");
+        box.textContent = text;
+        box.hidden = !text;
+      }
+
+      async function editSenders(path, address) {
+        const button = $("addSender");
+        button.disabled = true;
+        senderError("");
+        try {
+          const res = await fetch(path, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ address }),
+          });
+          const data = await res.json();
+          if (!res.ok) {
+            senderError(data.error || "הפעולה נכשלה.");
+            return false;
+          }
+          paint(data);
+          return true;
+        } catch (e) {
+          senderError("אין חיבור לסוכן.");
+          return false;
+        } finally {
+          button.disabled = false;
+        }
       }
 
       async function load() {
@@ -463,6 +606,19 @@
         }
       });
       $("refresh").addEventListener("click", () => post("/api/refresh"));
+
+      async function addSender() {
+        const field = $("newSender");
+        const address = field.value.trim();
+        if (!address) return;
+        if (await editSenders("/api/senders/add", address)) field.value = "";
+      }
+
+      $("addSender").addEventListener("click", addSender);
+      $("newSender").addEventListener("keydown", (e) => {
+        if (e.key === "Enter") addSender();
+      });
+      $("newSender").addEventListener("input", () => senderError(""));
 
       load();
       setInterval(load, 4000);

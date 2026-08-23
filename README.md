@@ -253,6 +253,18 @@ and logs it: emptying the boundary because someone saved a half-written line is 
 worse failure than a stale one. An explicit `--sender` is left fixed, being a
 deliberate narrowing for a single run.
 
+The dashboard edits the list, so the lawyer does not need the file or a
+developer. `rotem_agent/senders.py` replaces only the list items, leaving the
+`mailbox:` line, the comments and the indentation byte-for-byte alone, including
+the file's existing line endings — a config meant to be auditable is worth less
+if editing it destroys the notes explaining what it is for. The write goes
+through a temporary file and a rename, because the watcher reads this file every
+pass and a partial write is a window in which the boundary is whatever happened
+to be flushed. Removing the last address is refused: an empty list makes
+`load_mailbox_config` raise, the running watcher then keeps its previous list,
+and the page would show nobody while the agent carried on drafting. Stopping is
+what the switch is for.
+
 ```bash
 python -m rotem_agent.cli outlook-scan  --sender client@example.com
 python -m rotem_agent.cli outlook-draft --sender client@example.com
@@ -317,13 +329,21 @@ inherit the generic batch-file icon, and set to open minimised so the console
 window that hosts it stays out of the way.
 
 A page on `127.0.0.1:8765` with a switch to start and stop the agent, counts of
-emails answered and replies sent, and what has been spent today, this week and
-this month. It is built on the standard library: no framework, no build step,
+emails answered and replies sent, what has been spent today, this week and this
+month, and the allowlist with add and remove. It is built on the standard
+library: no framework, no build step,
 nothing to install beyond what the agent already needs, because every dependency
 is something that can fail during setup on a machine where nobody can diagnose
 it. It binds to loopback only, since the page lists client names and subjects.
 
-Four properties are less obvious than they look.
+Five properties are less obvious than they look.
+
+**The only writes that matter are guarded by the Origin header.** Loopback is
+not a boundary — any site open in the same browser can post to localhost — and
+one of those writes now widens what mail the agent may read. A browser will not
+let a cross-site request forge `Origin`, so an absent or matching one is the
+check, and a refusal is reported as a reason the person at the keyboard can act
+on rather than a failure they cannot.
 
 **A second launch shows the page rather than binding.** Double-clicking the icon
 again is how anyone checks whether the dashboard is open. The port is probed
