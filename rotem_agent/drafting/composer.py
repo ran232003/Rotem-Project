@@ -13,6 +13,8 @@ from rotem_agent.llm.base import LlmClient, LlmUsage
 from rotem_agent.llm.metering import CallRecord, MeteredClient
 from rotem_agent.mailparse.parser import ParsedEmail
 from rotem_agent.mailparse.quotes import QuotedMessage
+from rotem_agent.phrases import PhrasePolicy, load_policy as load_phrase_policy
+from rotem_agent.templates import Template, as_prompt_section, choose, load_templates
 from rotem_agent.skill import Skill, load_skill
 
 _PLACEHOLDER_SPAN = re.compile(r"\[\[.*?\]\]", re.DOTALL)
@@ -28,6 +30,17 @@ _LEAKED_INTERNAL = re.compile(
 # The identity gate in the skill: these senders must be confirmed before any
 # case detail leaves the office.
 _GATED_CLIENT_TYPES = {"opposing_party", "unknown"}
+
+# A sign-off on its own line near the end. Anchored to the line so that
+# "בברכה" inside a sentence, which is ordinary Hebrew, is not mistaken for one.
+_SIGNOFF_LINE = re.compile(
+    r"^[ \t]*(בברכה|בכבוד רב|בברכת[^\n]{0,30}|שלך בכבוד)[ \t]*,?[ \t]*$",
+    re.MULTILINE,
+)
+
+# Slots the templates use. Matched loosely because the model may reword the
+# contents of the brackets while still failing to remove them.
+_BRACKET_SLOT = re.compile(r"\[[^\]\n]{1,60}\]")
 
 
 class Excerpt(Protocol):
@@ -84,6 +97,8 @@ class DraftReport:
     usage: LlmUsage | None = None
     calls: list[CallRecord] = field(default_factory=list)
     seconds: float = 0.0
+    template: str = ""
+    template_reason: str = ""
 
     @property
     def ok(self) -> bool:
@@ -99,6 +114,9 @@ def compose(
     source_policy: str = "advisory",
     excerpts: list[Excerpt] | None = None,
     attachment_excerpts: list[Excerpt] | None = None,
+    matter_category: str | None = None,
+    client_type: str | None = None,
+    templates: list[Template] | None = None,
 ) -> DraftReport:
     firm = firm or load_firm()
     glossary = glossary if glossary is not None else load_glossary()
@@ -114,9 +132,35 @@ def compose(
     asks = extract_asks(email.latest_body, meter.labelled("asks"))
     style_examples = _style_examples(email.quoted_chain, firm)
 
+    # Chosen before the call, since the template goes into the prompt for it. The
+    # model's own classification is therefore unavailable, so this uses what the
+    # matter registry already established plus the words in the email.
+    #
+    # The firm's own earlier replies in this thread override a caller who guessed
+    # "potential client" from an unmatched address. That guess is easy to make,
+    # because a referring agency writes about a client from an address no
+    # matter.yaml lists, and getting it wrong here is expensive: the first-contact
+    # template instructs the model to decline advising until intake is complete,
+    # which turns a substantive reply to a live matter into a refusal to answer.
+    library = templates if templates is not None else load_templates()
+    effective_client_type = "existing_client" if style_examples else client_type
+    choice = choose(
+        library,
+        f"{email.subject}\n{email.latest_body}",
+        client_type=effective_client_type,
+        category=matter_category,
+    )
+
     response = meter.labelled("draft").complete_json(
-        system=build_system_prompt(firm, glossary, skill, source_policy),
-        user=build_user_prompt(email, asks, style_examples, excerpts, attachment_excerpts),
+        system=build_system_prompt(firm, glossary, skill, source_policy, matter_category),
+        user=build_user_prompt(
+            email,
+            asks,
+            style_examples,
+            excerpts,
+            attachment_excerpts,
+            template_section=as_prompt_section(choice),
+        ),
         schema=DRAFT_SCHEMA,
         temperature=0.3,
     )
@@ -142,6 +186,7 @@ def compose(
         source_policy,
         firm,
         [*excerpts, *attachment_excerpts],
+        template=choice.template,
     )
     effective_approval, approval_warning = _enforce_approval(internal)
     if approval_warning:
@@ -164,6 +209,8 @@ def compose(
         usage=meter.usage,
         calls=list(meter.calls),
         seconds=round(time.perf_counter() - started, 2),
+        template=choice.template.slug if choice.template else "",
+        template_reason=choice.reason,
     )
 
 
@@ -233,13 +280,36 @@ def _verify(
     source_policy: str,
     firm: Firm,
     excerpts: list[Excerpt] | None = None,
+    phrase_policy: PhrasePolicy | None = None,
+    template: Template | None = None,
 ) -> tuple[list[str], list[str]]:
     problems: list[str] = []
     warnings: list[str] = []
     excerpts = excerpts or []
 
+    # A template slot left unfilled is the one failure that is obvious to the
+    # client and to nobody else, since it reads as a finished sentence.
+    if unfilled := _unfilled_slots(draft_text, template):
+        problems.append(
+            "Template slot(s) left unfilled in the draft: " + ", ".join(unfilled)
+        )
+
+    if signoff := _SIGNOFF_LINE.search(draft_text):
+        warnings.append(
+            f"Draft ends with a sign-off ({signoff.group(1).strip()!r}); Outlook appends "
+            "the real signature, so the message would sign off twice."
+        )
+
     if not draft_text:
         problems.append("The model returned an empty draft.")
+
+    # Only the client-facing text. The internal note is allowed to say that a
+    # result is not guaranteed, and often should.
+    for entry, fragment in (phrase_policy or load_phrase_policy()).check(draft_text):
+        message = f"Forbidden wording {entry.phrase!r}: {fragment}" + (
+            f" ({entry.why})" if entry.why else ""
+        )
+        (problems if entry.severity == "problem" else warnings).append(message)
 
     if _has_signature(draft_text, firm):
         warnings.append(
@@ -252,16 +322,26 @@ def _verify(
 
     # A holding reply deliberately declines to answer, so unanswered asks are
     # expected there and only become a problem in a substantive reply.
+    #
+    # A deferring template is the same situation arrived at differently. The
+    # firm's intake templates exist precisely to withhold a route until the case
+    # has been examined, so "what can be done?" going unanswered is the template
+    # working. Reading that as a defect would report a problem on every correct
+    # first-contact reply, which is how a checker gets ignored.
     unanswered = [a.ask for a in answers if not a.answered]
     coverage_gap = len(answers) != len(asks.asks)
-    if internal.is_holding_reply:
+    deferring = template.defers_answers if template else False
+    if internal.is_holding_reply or deferring:
+        reason = (
+            "pending source verification"
+            if internal.is_holding_reply
+            else f"by design: the {template.genre} template withholds them until intake"
+        )
         if unanswered:
-            warnings.append(
-                f"Holding reply: {len(unanswered)} ask(s) deferred pending source verification."
-            )
+            warnings.append(f"{len(unanswered)} ask(s) deferred {reason}.")
         if coverage_gap:
             warnings.append(
-                f"Holding reply acknowledges {len(answers)} of {len(asks.asks)} asks."
+                f"Deferred reply acknowledges {len(answers)} of {len(asks.asks)} asks."
             )
     else:
         if unanswered:
@@ -341,6 +421,23 @@ def _verify(
     return problems, warnings
 
 
+def _unfilled_slots(draft_text: str, template: Template | None) -> list[str]:
+    """Bracketed slots still in the draft, excluding the agent's own placeholders.
+
+    The agent's placeholder format is deliberately doubled, as [[...]], and is a
+    legitimate signal to the lawyer that a fact is missing. A single-bracket slot
+    is template scaffolding that should have been filled or deleted.
+    """
+    found = []
+    for match in _BRACKET_SLOT.finditer(draft_text):
+        slot = match.group(0)
+        start, end = match.span()
+        doubled = draft_text[max(0, start - 1) : start] == "[" or draft_text[end : end + 1] == "]"
+        if not doubled:
+            found.append(slot)
+    return sorted(set(found))
+
+
 def _has_signature(draft_text: str, firm: Firm) -> bool:
     """The real Outlook signature is appended later, so the model must not add one."""
     tail = "\n".join(draft_text.strip().split("\n")[-3:])
@@ -412,6 +509,8 @@ def render_internal_note(report: DraftReport) -> str:
         f"- Approval: {note.approval}",
         f"- Holding reply: {'yes' if note.is_holding_reply else 'no'}",
         f"- Source policy: {report.source_policy}",
+        f"- Template: {report.template or 'none'}"
+        + (f" ({report.template_reason})" if report.template_reason else ""),
         f"- Next action: {note.next_action or '-'}",
     ]
     for title, items in (

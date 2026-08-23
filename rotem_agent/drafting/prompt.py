@@ -170,8 +170,12 @@ question should simply be left unused rather than worked into the reply.
 Return JSON matching the provided schema. The internal object is the internal
 note and is never sent. The draft object is the client-facing reply. Never put
 internal analysis, the words "INTERNAL" or "DO NOT SEND", strategy, or
-confidence levels into draft.body. Do not include a signature or sign-off with
-the firm name in draft.body; the signature is appended separately.
+confidence levels into draft.body.
+
+End draft.body with the last sentence of substance. Do not write a sign-off of
+any kind: no "בברכה", no "בכבוד רב", no firm name and no lawyer name. Outlook
+appends the real signature, so a sign-off here produces a message that signs off
+twice.
 
 Set draft.language to match the language of the incoming email. Write the
 internal note fields in Hebrew regardless, since the lawyer reads them.
@@ -187,12 +191,13 @@ def build_system_prompt(
     glossary: list[GlossaryTerm],
     skill: Skill,
     source_policy: str = "strict",
+    matter_category: str | None = None,
 ) -> str:
     terms = "\n".join(f"- {t.he}" + (f" ({t.en})" if t.en else "") for t in glossary)
     return _TEMPLATE.format(
         lawyer=firm.lawyer_name,
         firm=firm.firm_name,
-        skill=skill.as_prompt_section(),
+        skill=skill.as_prompt_section(matter_category),
         glossary=terms,
         policy=_STRICT_POLICY if source_policy == "strict" else _ADVISORY_POLICY,
         placeholder=PLACEHOLDER_FORMAT,
@@ -205,6 +210,7 @@ def build_user_prompt(
     style_examples: list[QuotedMessage],
     excerpts: list[Any] | None = None,
     attachments: list[Any] | None = None,
+    template_section: str = "",
 ) -> str:
     sections = [
         "## פרטי ההודעה הנכנסת",
@@ -237,6 +243,11 @@ def build_user_prompt(
         sections += ["", "## קבצים שצורפו להודעה זו"]
         for attachment in attachments:
             sections.append(f"\n--- [{attachment.citation}]\n{attachment.text}".rstrip())
+
+    # Last, and after the excerpts, because it is the instruction the model
+    # should still have in view when it starts composing.
+    if template_section:
+        sections += ["", template_section]
 
     sections += ["", "## שאלות ובקשות שיש לענות עליהן"]
     sections += [f"{i}. [{a.kind}] {a.text}" for i, a in enumerate(asks.asks, start=1)]

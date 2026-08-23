@@ -224,6 +224,134 @@ def test_internal_note_leakage_is_a_problem():
     assert any("leaked" in p for p in problems)
 
 
+def test_forbidden_wording_reaches_the_draft_verification():
+    """The phrase list has to fire through drafting, not only in its own unit."""
+    problems, _ = _verify(
+        "שלום רב, אין מה לדאוג, הבקשה שהגשנו תאושר על ידי הרשות בהקדם.",
+        [Answer(ask="a", answered=True, excerpt="x")],
+        _asks("a"),
+        _email("שאלה ארוכה דיה כדי לזהות שפה עברית בהודעה הנכנסת הזו"),
+        _note(),
+        "advisory",
+        FIRM,
+    )
+    assert any("אין מה לדאוג" in p for p in problems)
+
+
+def test_a_properly_hedged_draft_is_not_caught_by_the_phrase_list():
+    problems, warnings = _verify(
+        "שלום רב, הגשנו את הבקשה. לא ניתן לקבוע בוודאות מה תחליט הרשות, "
+        "ועצם ההגשה אינה מחייבת אותה לאשר.",
+        [Answer(ask="a", answered=True, excerpt="x")],
+        _asks("a"),
+        _email("שאלה ארוכה דיה כדי לזהות שפה עברית בהודעה הנכנסת הזו"),
+        _note(),
+        "advisory",
+        FIRM,
+    )
+    assert not any("Forbidden wording" in item for item in [*problems, *warnings])
+
+
+def test_the_internal_note_may_say_what_the_draft_may_not():
+    """An internal note should be free to record that nothing is guaranteed."""
+    problems, _ = _verify(
+        "שלום רב, הגשנו את הבקשה ואנו ממתינים למענה הרשות בעניין זה.",
+        [Answer(ask="a", answered=True, excerpt="x")],
+        _asks("a"),
+        _email("שאלה ארוכה דיה כדי לזהות שפה עברית בהודעה הנכנסת הזו"),
+        _note(next_action="להסביר ללקוח שאין מה לדאוג בשלב זה"),
+        "advisory",
+        FIRM,
+    )
+    assert not any("Forbidden wording" in p for p in problems)
+
+
+def test_a_deferring_template_makes_unanswered_asks_expected():
+    """The firm's intake templates withhold a route on purpose."""
+    from rotem_agent.templates import Template
+
+    problems, warnings = _verify(
+        "שלום רב, תודה על פנייתך. כדי שנוכל לבחון את העניין נבקש להשיב על השאלות הבאות.",
+        [Answer(ask="מה אפשר לעשות?", answered=False, excerpt="")],
+        _asks("מה אפשר לעשות?"),
+        _email("שאלה ארוכה דיה כדי לזהות שפה עברית בהודעה הנכנסת הזו"),
+        _note(),
+        "advisory",
+        FIRM,
+        template=Template(slug="t", title="t", body="גוף", genre="intake_questions"),
+    )
+    assert not any("reported unanswered" in p for p in problems)
+    assert any("deferred" in w for w in warnings)
+
+
+def test_without_a_template_an_unanswered_ask_is_still_a_problem():
+    problems, _ = _verify(
+        "שלום רב, תודה על פנייתך ואנו בודקים את העניין מול התיק בעניין זה.",
+        [Answer(ask="מה אפשר לעשות?", answered=False, excerpt="")],
+        _asks("מה אפשר לעשות?"),
+        _email("שאלה ארוכה דיה כדי לזהות שפה עברית בהודעה הנכנסת הזו"),
+        _note(),
+        "advisory",
+        FIRM,
+    )
+    assert any("reported unanswered" in p for p in problems)
+
+
+def test_an_unfilled_template_slot_is_a_problem():
+    """It reads as a finished sentence to everyone except the client."""
+    problems, _ = _verify(
+        "שלום רב, בהמשך לפנייתך נבקש להשלים את החומר עד יום [תאריך] כדי להתקדם.",
+        [Answer(ask="a", answered=True, excerpt="x")],
+        _asks("a"),
+        _email("שאלה ארוכה דיה כדי לזהות שפה עברית בהודעה הנכנסת הזו"),
+        _note(),
+        "advisory",
+        FIRM,
+    )
+    assert any("[תאריך]" in p for p in problems)
+
+
+def test_the_agents_own_placeholder_is_not_a_template_slot():
+    """[[...]] is the deliberate signal to the lawyer and must survive."""
+    problems, _ = _verify(
+        "שלום רב, נעדכן אותך עד [[להשלמה: תאריך מענה]] בהמשך לפנייתך בעניין זה.",
+        [Answer(ask="a", answered=True, excerpt="x")],
+        _asks("a"),
+        _email("שאלה ארוכה דיה כדי לזהות שפה עברית בהודעה הנכנסת הזו"),
+        _note(),
+        "advisory",
+        FIRM,
+    )
+    assert not any("slot" in p for p in problems)
+
+
+def test_a_signoff_is_flagged_because_outlook_appends_one():
+    _, warnings = _verify(
+        "שלום רב, קיבלנו את פנייתך ואנו בודקים את החומר בעניין זה.\n\nבברכה,",
+        [Answer(ask="a", answered=True, excerpt="x")],
+        _asks("a"),
+        _email("שאלה ארוכה דיה כדי לזהות שפה עברית בהודעה הנכנסת הזו"),
+        _note(),
+        "advisory",
+        FIRM,
+    )
+    assert any("sign off twice" in w for w in warnings)
+
+
+def test_the_word_in_a_sentence_is_not_a_signoff():
+    """'בברכה' occurs in ordinary Hebrew; only a line of its own is a sign-off."""
+    _, warnings = _verify(
+        "שלום רב, קיבלנו את פנייתך בברכה רבה ואנו בודקים את החומר בעניין זה.",
+        [Answer(ask="a", answered=True, excerpt="x")],
+        _asks("a"),
+        _email("שאלה ארוכה דיה כדי לזהות שפה עברית בהודעה הנכנסת הזו"),
+        _note(),
+        "advisory",
+        FIRM,
+    )
+    assert not any("sign off twice" in w for w in warnings)
+
+
 def test_language_mismatch_is_a_problem():
     problems, _ = _verify(
         "Dear Ben, we received your message and will revert with a detailed reply shortly.",
