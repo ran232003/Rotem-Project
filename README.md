@@ -2,9 +2,10 @@
 
 Generates a Hebrew reply draft for incoming law-firm email, for review by the
 lawyer. Nothing is ever sent: drafts are written to the Drafts folder and wait
-for a human. Phase 0 runs offline from a saved `.eml` file; the Outlook
-connector reads a live mailbox and writes real drafts. No vector store or UI
-yet.
+for a human. It runs offline from a saved `.eml` file, or against a live
+mailbox through the Outlook connector. Client documents are retrieved from a
+local hybrid index. There is no UI beyond the command line and the Drafts
+folder.
 
 ## Setup
 
@@ -21,6 +22,26 @@ python -m venv .venv
 .venv\Scripts\activate
 python -m pip install -r requirements.txt
 ```
+
+On a fresh Windows machine, `setup.ps1` does all of the above in one go,
+including seeding the config files from their examples:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File setup.ps1
+```
+
+Then confirm the machine is actually ready. `doctor` checks the interpreter,
+the packages, the key, every config file, and Outlook, and prints a fix beside
+anything it finds:
+
+```bash
+python -m rotem_agent.cli doctor --online
+```
+
+`--online` additionally confirms the API accepts the key; `--no-outlook` skips
+the desktop checks. The exit code is non-zero when something is blocking.
+[docs/SETUP.md](docs/SETUP.md) is the same ground written for a non-technical
+user installing on the lawyer's own machine.
 
 ## Use
 
@@ -122,12 +143,73 @@ outside that folder. Inline images are skipped, so a signature logo is not
 mistaken for a document. A long attachment is trimmed to the passages that best
 match the email rather than to its first pages, which would favour letterheads.
 
-A scanned attachment is reported as unread rather than passed through empty:
+A scan or a photograph attached to an email is transcribed automatically, because
+a client who photographs a certificate expects the reply to address it and one
+email carries a page or two. Bulk indexing of a matter folder does not do this
+unasked: see below.
+
+### Reading scans
+
+Certificates, apostilles and old passports arrive as photographs of paper, so a
+PDF with no text layer and image files are transcribed by the same multimodal
+model that writes the drafts. That avoids a second vendor, a second key and a
+second data-processing agreement, and the cost lands in the same usage log.
+
+The transcription is verbatim by instruction and at temperature zero, which
+matters more here than it sounds. A model asked to transcribe tends to tidy what
+it reads, and the point of a certificate audit is to find that a name is spelled
+`IVANOVA` on a birth certificate and `IVANOVva` on a passport. A transcription
+that normalises one into the other destroys the evidence. Illegible passages are
+marked rather than guessed, and the count is reported.
+
+Anything read this way is recorded as machine-read and says so in its citation:
 
 ```
-attachment not read: passport.pdf: looks like a scan with no text layer, so its
-contents are not available to the draft. Hebrew OCR is not wired up yet.
+attachment: passport.jpg: transcribed from a scan by machine. Names, dates and
+numbers taken from it must be checked against the original.
+attachment excerpt: passport.jpg#0 (machine-read)
 ```
+
+Nothing machine-read is ever treated as established fact. The audit below refuses
+to assert a name discrepancy from a transcription without marking it as needing
+the original.
+
+Because OCR costs tokens per page, a whole matter folder is opt-in:
+
+```bash
+python -m rotem_agent.cli ingest --matter anna-status --ocr
+```
+
+Roughly \$0.003 per page at current prices. `matters` marks each document as
+`NEEDS OCR` or `machine-read` so nothing is silently indexed empty.
+
+### The public documents audit
+
+A separate command, and deliberately not part of drafting. It reads a matter's
+documents whole rather than the passages closest to a query, because a name
+discrepancy lives in whichever certificate happens to hold it, and it produces an
+internal work product rather than an email:
+
+```bash
+python -m rotem_agent.cli audit --matter anna-status
+```
+
+It builds a year-by-year personal-status timeline, finds the periods no document
+accounts for, compares names across every certificate, and writes the firm's
+ten-column table of required documents to
+`out/audits/<matter>/public-documents-audit.md`.
+
+The procedure it follows is `skills/public-documents-audit/`, from the firm's
+"בדיקת תעודות ציבוריות". Four limits are built into it, and all four exist because
+the procedure as written states requirements without citing what imposes them:
+it may not cite a procedure number or regulation, it may not assert a discrepancy
+resting on a machine-read source without flagging the original, it may not invent
+a threshold the firm has not set, and it may not guess whether a country is party
+to the Hague Convention. Where an answer turns on one of those, it writes a
+`[[TBD: ...]]` placeholder and adds the question to the open questions for the
+lawyer. A citation to a document not in the matter is reported as a problem.
+
+This is a work product to check, not an answer. It is not sent to anyone.
 
 ### Grounding
 
@@ -291,6 +373,88 @@ a plausible but wrong procedural claim is the failure mode this project has to
 avoid. The choice is temporary: once source lookup exists, `strict` will produce
 sourced answers rather than holding replies and this flag becomes unnecessary.
 
+## The firm's templates
+
+`templates/` holds the firm's own reply templates, one markdown file each, with
+frontmatter saying which situation the template governs. Their content is
+Rotem's, taken from her template library; only the sign-off is removed, because
+Outlook appends the real signature.
+
+A model asked to invent a reply from a description of a house style produces
+something plausible and slightly off, every time. Handing it the firm's actual
+template for the genre and asking it to adapt is cheaper and lands much closer.
+Her diagnostic question sets and her limits paragraphs are the product of
+practice, and they are worth reusing verbatim.
+
+The template is chosen before the drafting call, because it goes into the prompt
+for that call. That rules out using the model's own classification, so selection
+uses what is already known: whether the sender resolves to an open matter, that
+matter's category, and the words in the email. Frontmatter fields:
+
+- `genre` — what kind of message this answers.
+- `client_type` — `existing_client`, `potential_client`, or a list. Omit for any.
+- `applies_to` — matter categories. Empty means any.
+- `signals` — Hebrew words that select it. Single stems work better than phrases,
+  because Hebrew attaches possessives and articles: `זוג` reaches `זוגי`, whereas
+  `בן זוג` does not.
+- `fallback` — use when nothing else matches. Exactly one template has it.
+- `defers_answers` — optional override; otherwise inferred from the genre.
+
+Two behaviours exist because getting them wrong was worse than having no
+templates at all.
+
+A template scoped to this matter's category wins a tie, but never wins on its
+own. Without that rule an email saying only "thank you" selected the
+border-emergency acknowledgement, because the matter happened to be an entry
+refusal.
+
+Prior correspondence from the firm in the thread means an existing client,
+whatever the address suggests. A referring agency writes about a client from an
+address no `matter.yaml` lists, so the sender looks new; the first-contact
+template then instructs the model to decline advising until intake, and a
+substantive reply to a live matter becomes a refusal to answer. Measured on the
+test thread, that dropped question coverage from five of five to none.
+
+Every guardrail applies to a template-derived draft unchanged. A template is a
+form of words, not an authority: it cannot license a legal claim, and the
+verification still catches unfilled slots, a copied sign-off, forbidden wording
+and ungrounded numbers.
+
+Because the firm's templates are all intake and acknowledgement, they withhold a
+substantive answer on purpose. The coverage check knows this from the genre, so
+"what can be done?" going unanswered is reported as deferred rather than as a
+defect. A template that does answer questions should say `defers_answers: false`.
+
+To add a batch:
+
+```bash
+python -m tools.extract_templates "C:\path\to\folder"   # writes the stubs
+python -m tools.survey_corpus "C:\path\to\folder"       # voice and calibration
+```
+
+`extract_templates` leaves the frontmatter as `TODO`, which is deliberate: only a
+person can say which categories a template governs. A test fails while any
+template still says `TODO`.
+
+## Forbidden wording
+
+The firm's Hebrew conventions list phrases it does not use: `אין מה לדאוג`,
+`מובטח`, `בוודאות`, `אין בעיה`, `כפי שכבר הסברנו`, and calling a preliminary view
+`חוות דעת משפטית`. The prompt passes those on, but a prompt is a request, so the
+list is also enforced against the finished draft in `rotem_agent/phrases.py`.
+
+A categorical assurance is reported as a problem and holds the draft back; a
+merely brusque phrase is reported as a warning beside it. Which is which is set
+per phrase in `config/forbidden_phrases.yaml`, not in code.
+
+Two details stop the check from being either useless or annoying. Only the
+client-facing draft is checked, never the internal note, which should be free to
+record that nothing is guaranteed. And a phrase marked `unless_negated` is
+cleared by a negator shortly before it, because `לא ניתן לקבוע בוודאות` is the
+hedging the firm insists on while `בוודאות תאושר` is the wording it forbids. That
+negator match respects word boundaries with an allowance for attached
+conjunctions, so `ולא` negates but the `לא` inside `מלא` does not.
+
 ## How it works
 
 1. `mailparse` decodes the MIME message, splits the new content from the quoted
@@ -338,6 +502,10 @@ This repository must never contain privileged material.
 - `config/glossary.yaml` — terms of art, to stop the model paraphrasing where
   the exact term matters.
 - `config/boilerplate.yaml` — patterns for disclaimers and signature blocks.
+- `config/forbidden_phrases.yaml` — wording the firm does not use in client-facing
+  text, with a severity per phrase. Checked against the draft in code rather than
+  asked for in the prompt, because it is decidable by looking at the text. Editing
+  this file needs no code change.
 - `config/mailbox.yaml` — which mailbox to read and which senders may be read.
   Git-ignored; copy from `config/mailbox.example.yaml`.
 - `config/matters.yaml` — the folder holding client matters. Git-ignored; point it
@@ -376,11 +544,28 @@ This repository must never contain privileged material.
 - Polling only runs while the command is running, and there is no delta
   tracking: every cycle re-runs the sender restriction over the mailbox. That is
   cheap at one allowlisted sender but will not scale to a whole mailbox.
-- Scanned documents are detected and reported, not read. A PDF with no text
-  layer is recorded as present but unsearchable and listed under "these look like
-  scans", because indexing it as empty would make the agent answer as though the
-  document did not exist. Hebrew OCR is not wired up yet, and most immigration
-  paperwork is scans.
+- Only the default store is read. `mailbox` in `mailbox.yaml` is compared
+  against the signed-in accounts but does not select anything, so a mailbox
+  added as a second account, or reached by Exchange delegation, is invisible to
+  the reader while still looking correctly configured. `doctor` reports this as
+  a blocking **Default mailbox** failure rather than letting it pass silently,
+  but the fix is a separate Outlook profile, not a setting.
+- A machine-read certificate is evidence of what the model saw, not of what the
+  paper says. Transcription has been checked against known ground truth and did
+  preserve a deliberate name discrepancy rather than normalising it, but that is
+  one test, not a measurement. Every name and date taken from a scan needs
+  checking against the original before anything is asserted from it.
+- The audit gets facts about a document subtly wrong in ways the checks do not
+  catch. Observed: a cell described 01.09.2026 as the date of the Authority's
+  letter when it is the deadline the letter sets. The citation was right and the
+  date was right; the relationship between them was not.
+- The audit has no evaluation harness either, and it is a longer output than a
+  draft with more room to be confidently wrong. Treat the first several as
+  drafts of a checklist rather than a checklist.
+- Category gating decides which procedures reach the prompt from the matter's
+  `category` in `matter.yaml`. A miscategorised matter therefore silently loses
+  a procedure. An unknown category keeps every procedure, so a first enquiry
+  with no folder yet is covered.
 - Retrieval uses one query built from the subject and body. Querying per
   extracted question would retrieve better for a message asking several
   unrelated things.

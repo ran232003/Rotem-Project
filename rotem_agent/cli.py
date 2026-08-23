@@ -5,12 +5,14 @@ import dataclasses
 import json
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from rotem_agent import logs, usage
 from rotem_agent.analysis.questions import extract_asks
 from rotem_agent.attachments import excerpts_from_files, safe_filename, save_eml_attachments
 from rotem_agent.config import OUT_DIR, ConfigError, load_settings
+from rotem_agent.doctor import FAIL, format_report, run_all
 from rotem_agent.drafting.composer import compose, render_draft_html, render_internal_note
 from rotem_agent.llm.gemini import GeminiClient
 from rotem_agent.lock import AlreadyRunning, SingleInstance
@@ -20,6 +22,7 @@ from rotem_agent.outlook import OutlookError, OutlookMailbox, load_mailbox_confi
 from rotem_agent.pricing import format_money, format_usd, load_prices
 from rotem_agent.retrieval import ChunkStore, GeminiEmbedder, ingest_matter, search
 from rotem_agent.skill import load_skill
+from rotem_agent.templates import load_templates
 from rotem_agent.state import ConversationMatters, DraftLedger
 from rotem_agent.watch import WatchOptions, run_cycle, watch
 
@@ -139,12 +142,36 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Lexical index only; skips the embedding API entirely",
     )
+    ingest_cmd.add_argument(
+        "--ocr",
+        action="store_true",
+        help="Transcribe scans and photographs. Costs tokens per page, so a whole "
+        "folder of certificates is opt-in; email attachments are always read.",
+    )
+
+    audit_cmd = sub.add_parser(
+        "audit",
+        help="Audit a matter's public certificates and produce the document table",
+    )
+    audit_cmd.add_argument("--matter", required=True)
+    audit_cmd.add_argument("--model", default=None)
+    audit_cmd.add_argument("--out", type=Path, default=OUT_DIR / "audits")
 
     search_cmd = sub.add_parser("search", help="Query a matter's documents")
     search_cmd.add_argument("query")
     search_cmd.add_argument("--matter", required=True)
     search_cmd.add_argument("--top", type=int, default=6)
     search_cmd.add_argument("--no-embed", action="store_true")
+
+    doctor_cmd = sub.add_parser(
+        "doctor", help="Check this machine is set up correctly and say what is missing"
+    )
+    doctor_cmd.add_argument(
+        "--online", action="store_true", help="Also confirm the Gemini key is accepted"
+    )
+    doctor_cmd.add_argument(
+        "--no-outlook", action="store_true", help="Skip the Outlook checks"
+    )
 
     demo_cmd = sub.add_parser(
         "outlook-demo",
@@ -182,8 +209,12 @@ def main(argv: list[str] | None = None) -> int:
             return _run_ingest(args)
         if args.command == "search":
             return _run_search(args)
+        if args.command == "audit":
+            return _run_audit(args)
         if args.command == "outlook-demo":
             return _run_outlook_demo(args)
+        if args.command == "doctor":
+            return _run_doctor(args)
         return _run_draft(args)
     except (ConfigError, OutlookError) as exc:
         print(f"\nError: {exc}", file=sys.stderr)
@@ -194,6 +225,12 @@ def main(argv: list[str] | None = None) -> int:
         # been closed hours ago.
         logs.logger().exception("unhandled error running %s", args.command)
         raise
+
+
+def _run_doctor(args: argparse.Namespace) -> int:
+    checks = run_all(online=args.online, skip_outlook=args.no_outlook)
+    print(format_report(checks))
+    return 1 if any(c.status == FAIL for c in checks) else 0
 
 
 def _run_parse(path: Path) -> int:
@@ -218,12 +255,15 @@ def _run_draft(args) -> int:
     excerpts: list = []
     attachments: list = []
     matter = ""
+    category: str | None = None
     if not args.no_files:
-        excerpts, matter = _retrieve(email, args.matter, no_embed=args.no_embed)
+        excerpts, matter, category = _retrieve(email, args.matter, no_embed=args.no_embed)
         saved = save_eml_attachments(args.eml, args.out / "attachments")
-        attachments = _read_attachments(saved, email)
+        attachments = _read_attachments(saved, email, matter=matter)
 
-    report = _compose(email, args.model, args.source_policy, excerpts, attachments)
+    report = _compose(
+        email, args.model, args.source_policy, excerpts, attachments, category, matter
+    )
     _emit(report, args.out, command="draft", sender=email.from_, matter=matter)
     return 0 if report.ok else 1
 
@@ -233,15 +273,32 @@ def _make_drafter(model: str | None, source_policy: str):
     settings = load_settings()
     client = GeminiClient(api_key=settings.gemini_api_key, model=model or settings.model)
     skill = load_skill()
+    templates = load_templates()
     print(f"\nDrafting with {client.model}, source policy '{source_policy}' ...")
-    return lambda email, excerpts=None, attachments=None: compose(
+    if templates:
+        print(f"{len(templates)} firm template(s) available.")
+    return lambda email, excerpts=None, attachments=None, category=None, matter="": compose(
         email,
         client,
         skill=skill,
         source_policy=source_policy,
         excerpts=excerpts,
         attachment_excerpts=attachments,
+        matter_category=category,
+        client_type=_client_type(matter),
+        templates=templates,
     )
+
+
+def _client_type(matter: str | None) -> str:
+    """A first guess, needed because the template is chosen before the model runs.
+
+    A sender who resolves to an open matter is a client of the firm. A sender who
+    does not may still be one, writing from a new address or through an agency, so
+    drafting corrects this from the thread when the firm has already replied in it.
+    The model classifies the sender properly in the internal note either way.
+    """
+    return "existing_client" if matter else "potential_client"
 
 
 def _compose(
@@ -250,20 +307,36 @@ def _compose(
     source_policy: str,
     excerpts=None,
     attachments=None,
+    category: str | None = None,
+    matter: str = "",
 ):
-    return _make_drafter(model, source_policy)(email, excerpts, attachments)
+    return _make_drafter(model, source_policy)(email, excerpts, attachments, category, matter)
 
 
-def _read_attachments(paths: list[Path], email: ParsedEmail) -> list:
+def _read_attachments(paths: list[Path], email: ParsedEmail, *, matter: str = "") -> list:
     if not paths:
         return []
     query = f"{email.subject}\n{email.latest_body}"
-    excerpts, notes = excerpts_from_files(paths, query)
+    # Unlike a bulk ingest, this is not opt-in: an email carries a page or two,
+    # and a client who photographs a certificate expects the reply to address it.
+    ocr = _ocr_or_none()
+    ocr_usage: list = []
+    excerpts, notes = excerpts_from_files(paths, query, ocr=ocr, usage=ocr_usage)
     for note in notes:
-        print(f"  attachment not read: {note}")
+        print(f"  attachment: {note}")
     for excerpt in excerpts:
         print(f"  attachment excerpt: {excerpt.citation}")
+    _record_ocr_usage(ocr, ocr_usage, command="attachment", matter=matter)
     return excerpts
+
+
+def _ocr_or_none():
+    """A missing key must degrade to 'cannot read the scan', never crash a draft."""
+    try:
+        return _ocr()
+    except Exception as exc:
+        print(f"  OCR unavailable ({exc}); scans will be reported unread")
+        return None
 
 
 def _emit(
@@ -290,6 +363,10 @@ def _emit(
         + (" | HOLDING REPLY" if note.is_holding_reply else "")
     )
     print(f"Coverage: {sum(a.answered for a in report.answers)}/{len(report.asks.asks)} asks answered")
+    if report.template:
+        print(f"Template: {report.template} ({report.template_reason})")
+    elif report.template_reason:
+        print(f"Template: none ({report.template_reason})")
     for label, items in (("PROBLEM", report.problems), ("warning", report.warnings)):
         for item in items:
             print(f"  {label}: {item}")
@@ -372,7 +449,12 @@ def _run_matters() -> int:
                 print(f"  agents   : {', '.join(matter.agent_addresses)}")
             print(f"  indexed  : {len(documents)} document(s), {chunks} chunk(s)")
             for document in documents:
-                flag = "  NEEDS OCR" if document.needs_ocr else ""
+                if document.needs_ocr:
+                    flag = "  NEEDS OCR"
+                elif document.machine_read:
+                    flag = "  machine-read"
+                else:
+                    flag = ""
                 print(f"    - {document.rel_path} ({document.chunks} chunks){flag}")
     return 0
 
@@ -422,17 +504,35 @@ def _run_ingest(args) -> int:
 
     embedder = _embedder(args.no_embed)
     print(f"Embeddings: {embedder.name if embedder else 'disabled (lexical only)'}")
+    ocr = _ocr() if args.ocr else None
+    print(f"OCR       : {ocr.name if ocr else 'off (pass --ocr to read scans)'}")
+
     needs_ocr: list[str] = []
+    machine_read: list[str] = []
     with ChunkStore() as store:
         for matter in targets:
             print(f"\n{matter.slug}")
-            summary = ingest_matter(matter, store, embedder, force=args.force)
+            summary = ingest_matter(matter, store, embedder, force=args.force, ocr=ocr)
             print(
                 f"  {len(summary.added)} indexed, {len(summary.unchanged)} unchanged, "
                 f"{len(summary.removed)} removed, {len(summary.skipped)} unsupported, "
                 f"{summary.chunks} new chunk(s)"
             )
             needs_ocr += [f"{matter.slug}/{p}" for p in summary.needs_ocr]
+            machine_read += [f"{matter.slug}/{p}" for p in summary.machine_read]
+            if summary.machine_read:
+                print(
+                    f"  transcribed {len(summary.machine_read)} scan(s) by machine; "
+                    "confirm names and dates against the originals"
+                )
+            # Per matter, not per run: an ingest may span several clients and the
+            # spend has to be attributable to one of them.
+            _record_ocr_usage(ocr, summary.ocr_usage, command="ingest", matter=matter.slug)
+
+    if machine_read:
+        print(f"\nMachine-read ({len(machine_read)}):")
+        for item in machine_read:
+            print(f"  - {item}")
 
     if needs_ocr:
         # Silence here would be dangerous: the file looks indexed but holds
@@ -440,7 +540,124 @@ def _run_ingest(args) -> int:
         print("\nThese look like scans and are not searchable without OCR:")
         for item in needs_ocr:
             print(f"  - {item}")
+        if ocr is None:
+            print("  Run again with --ocr to read them.")
     return 0
+
+
+def _ocr():
+    from rotem_agent.docs.ocr import GeminiOcr
+
+    return GeminiOcr(load_settings().gemini_api_key)
+
+
+def _record_ocr_usage(ocr, records: list, *, command: str, matter: str = "") -> None:
+    """OCR spends real tokens, so it belongs in the same ledger as drafting.
+
+    Logged under its own command name rather than folded into the draft, because
+    a scan is transcribed once and reused by every later reply; blending the two
+    would make the first draft on a matter look wildly expensive.
+    """
+    if not ocr or not records:
+        return
+    entry = usage.UsageRecord(
+        at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        command=f"{command}:ocr",
+        model=ocr.name,
+        matter=matter,
+        input_tokens=sum(r.input_tokens or 0 for r in records),
+        output_tokens=sum(r.output_tokens or 0 for r in records),
+        thinking_tokens=sum(r.thinking_tokens or 0 for r in records),
+        cached_tokens=sum(r.cached_tokens or 0 for r in records),
+        calls=[{"purpose": "ocr", "in": r.input_tokens, "out": r.output_tokens} for r in records],
+    )
+    usage.UsageLog().record(entry)
+    prices = load_prices()
+    print(
+        f"  OCR: {len(records)} page-call(s), {entry.input_tokens} in / "
+        f"{entry.billed_output_tokens} out, {format_money(prices, entry.cost_usd(prices))}"
+    )
+
+
+def _run_audit(args) -> int:
+    from rotem_agent import audit as audit_module
+
+    registry = MatterRegistry.discover()
+    matter = registry.by_slug(args.matter)
+    if matter is None:
+        print(f"No matter with slug {args.matter}", file=sys.stderr)
+        return 1
+
+    docs = _matter_documents(matter.slug)
+    if not docs:
+        print(
+            f"Nothing indexed for {matter.slug}. Put the certificates in "
+            f"{matter.docs_dir} and run:\n"
+            f"  python -m rotem_agent.cli ingest --matter {matter.slug} --ocr"
+        )
+        return 1
+
+    scans = sum(1 for d in docs if d.machine_read)
+    print(f"Auditing {matter.slug}: {len(docs)} document(s), {scans} machine-read")
+
+    settings = load_settings()
+    client = GeminiClient(api_key=settings.gemini_api_key, model=args.model or settings.model)
+    skill = load_skill(audit_module.AUDIT_SKILL)
+    report = audit_module.run_audit(
+        matter.slug, docs, client, skill, client_name=matter.client_name
+    )
+
+    destination = args.out / matter.slug
+    destination.mkdir(parents=True, exist_ok=True)
+    markdown = destination / "public-documents-audit.md"
+    markdown.write_text(
+        audit_module.render_markdown(report, matter.client_name), encoding="utf-8"
+    )
+    (destination / "audit.json").write_text(
+        json.dumps(report.data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    rows = report.rows()
+    print(f"\n{len(rows)} document(s) required, {len(report.data.get('gaps') or [])} gap(s)")
+    for row in rows:
+        urgency = str(row.get("urgency", "")).strip()
+        print(f"  - {row.get('document')} ({row.get('country')}){f'  [{urgency}]' if urgency else ''}")
+    for warning in report.warnings:
+        print(f"  warning: {warning}")
+    print(f"\nWrote {markdown}")
+
+    entry = usage.from_report(report, command="audit", matter=matter.slug)
+    usage.UsageLog().record(entry)
+    _print_cost(entry)
+    return 0 if report.ok else 1
+
+
+def _matter_documents(slug: str) -> list:
+    """Every indexed chunk of a matter, reassembled per document.
+
+    The audit needs whole certificates, not the passages closest to a query: a
+    name discrepancy lives in whichever document happens to hold it.
+    """
+    from rotem_agent.audit import SourceDoc
+
+    with ChunkStore() as store:
+        records = {record.rel_path: record for record in store.documents(slug)}
+        by_path: dict[str, list] = {}
+        for chunk in store.load_chunks(slug):
+            by_path.setdefault(chunk.rel_path, []).append(chunk)
+
+    docs = []
+    for rel_path, chunks in sorted(by_path.items()):
+        chunks.sort(key=lambda c: c.idx)
+        record = records.get(rel_path)
+        docs.append(
+            SourceDoc(
+                citation=rel_path,
+                text="\n".join(chunk.text for chunk in chunks),
+                machine_read=bool(record.machine_read) if record else False,
+            )
+        )
+    return docs
 
 
 def _run_search(args) -> int:
@@ -463,26 +680,27 @@ def _retrieve(
     conversation_id: str | None = None,
     no_embed: bool = False,
     top_k: int = 6,
-) -> tuple[list, str]:
+) -> tuple[list, str, str | None]:
     """Find passages in the client's file that bear on this email.
 
-    Returns the passages and the matter they came from, the latter so spend can
-    be attributed to a client. No excerpts rather than an error when no matter
-    can be identified: a draft written from the thread alone is the current
-    behaviour and is safe, whereas guessing a matter would mix one client's
-    papers into another's reply.
+    Returns the passages, the matter they came from and its category. The slug
+    attributes spend to a client; the category decides which of the firm's
+    procedures belong in the prompt. No excerpts rather than an error when no
+    matter can be identified: a draft written from the thread alone is the
+    current behaviour and is safe, whereas guessing a matter would mix one
+    client's papers into another's reply.
     """
     try:
         registry = MatterRegistry.discover()
     except ConfigError as exc:
         print(f"Client files not configured, drafting from the thread alone. ({exc})")
-        return [], ""
+        return [], "", None
 
     if matter_slug:
         matter = registry.by_slug(matter_slug)
         if matter is None:
             print(f"No matter with slug {matter_slug}", file=sys.stderr)
-            return [], ""
+            return [], "", None
     else:
         memory = ConversationMatters()
         resolution = registry.resolve(
@@ -495,7 +713,7 @@ def _retrieve(
                 print(f"  candidate: {candidate.slug}")
             if resolution.ambiguous:
                 print("  pass --matter <slug> to choose.")
-            return [], ""
+            return [], "", None
         matter = resolution.matter
         memory.remember(conversation_id, matter.slug)
         print(f"Matter: {matter.slug} ({resolution.reason})")
@@ -506,7 +724,7 @@ def _retrieve(
     print(f"Retrieved {len(hits)} excerpt(s) from {matter.slug}")
     for hit in hits:
         print(f"  {hit.citation}  ({hit.found_by})")
-    return hits, matter.slug
+    return hits, matter.slug, matter.category or None
 
 
 def _mailbox() -> "OutlookMailbox":
@@ -553,17 +771,20 @@ def _run_outlook_draft(args) -> int:
     excerpts: list = []
     attachments: list = []
     matter = ""
+    category: str | None = None
     if not args.no_files:
-        excerpts, matter = _retrieve(
+        excerpts, matter, category = _retrieve(
             email,
             args.matter,
             conversation_id=found.conversation_id,
             no_embed=args.no_embed,
         )
         saved = box.save_attachments(found.item, args.out / "attachments")
-        attachments = _read_attachments(saved, email)
+        attachments = _read_attachments(saved, email, matter=matter)
 
-    report = _compose(email, args.model, args.source_policy, excerpts, attachments)
+    report = _compose(
+        email, args.model, args.source_policy, excerpts, attachments, category, matter
+    )
     _emit(
         report,
         args.out,
@@ -613,7 +834,7 @@ def _watch_loop(args) -> int:
 
     box = _mailbox()
     ledger = DraftLedger()
-    drafter = _make_drafter(args.model, args.source_policy)
+    compose_draft = _make_drafter(args.model, args.source_policy)
     options = WatchOptions(
         save=args.save,
         interval_seconds=args.interval,
@@ -627,10 +848,20 @@ def _watch_loop(args) -> int:
     print(f"Ledger holds {len(ledger)} answered message(s) at {ledger.path}")
     if not args.save:
         print("Dry run: no drafts will be written. Pass --save to create them.")
-    # Which matter the last retrieval resolved to, so the spend can be
-    # attributed to a client. Retrieval and emission are separate callbacks in
-    # the loop, so the slug is carried between them here.
-    resolved_matter = {"slug": ""}
+    # What the last retrieval resolved to. Retrieval, drafting and emission are
+    # separate callbacks in the loop, so the slug (for attributing spend) and the
+    # category (for choosing which procedures belong in the prompt) are carried
+    # between them here.
+    resolved_matter: dict[str, str | None] = {"slug": "", "category": None}
+
+    def drafter(email, excerpts=None, attachments=None):
+        return compose_draft(
+            email,
+            excerpts,
+            attachments,
+            resolved_matter["category"],
+            resolved_matter["slug"] or "",
+        )
 
     def emitter(report, match):
         """One folder per answered message, so the note survives the next run."""
@@ -646,12 +877,13 @@ def _watch_loop(args) -> int:
         )
 
     def retriever(email, match):
-        excerpts, matter = _retrieve(
+        excerpts, matter, category = _retrieve(
             email, None, conversation_id=match.conversation_id, no_embed=args.no_embed
         )
         resolved_matter["slug"] = matter
+        resolved_matter["category"] = category
         saved = box.save_attachments(match.item, OUT_DIR / "attachments")
-        return excerpts, _read_attachments(saved, email)
+        return excerpts, _read_attachments(saved, email, matter=matter or "")
 
     if args.no_files:
         retriever = None
@@ -720,7 +952,7 @@ def _run_usage(args) -> int:
         width = max(len(name) for name, _ in rows)
         for name, group_totals in rows:
             print(
-                f"  {name:<{width}}  {group_totals.drafts:>3} draft(s)  "
+                f"  {name:<{width}}  {group_totals.records:>3} run(s)  "
                 f"in {group_totals.input_tokens:>8,}  "
                 f"out {group_totals.billed_output_tokens:>8,}  "
                 f"{format_usd(group_totals.cost_usd)}"
@@ -741,19 +973,19 @@ def _run_usage(args) -> int:
     thinking = (
         f" (incl. {grand.thinking_tokens:,} reasoning)" if grand.thinking_tokens else ""
     )
-    print(f"\n{grand.drafts} draft(s)")
+    print(f"\n{grand.records} metered run(s)")
     print(f"  input   {grand.input_tokens:>10,} tokens")
     print(f"  output  {grand.billed_output_tokens:>10,} tokens{thinking}")
     print(f"  time    {grand.seconds:>10.1f} s")
     average = grand.average_usd
     print(
         f"  cost    {format_money(prices, grand.cost_usd):>10}"
-        + (f"   average {format_usd(average)} per draft" if average is not None else "")
+        + (f"   average {format_usd(average)} per run" if average is not None else "")
     )
     if grand.unpriced:
         missing = sorted({r.model for r in records if r.cost_usd(prices) is None})
         print(
-            f"\n{grand.unpriced} draft(s) are not costed because no price is on file for: "
+            f"\n{grand.unpriced} run(s) are not costed because no price is on file for: "
             + ", ".join(missing)
         )
         print("  Add them to config/pricing.yaml and run this again; nothing is lost,")
