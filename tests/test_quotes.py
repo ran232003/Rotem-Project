@@ -8,8 +8,8 @@ GMAIL_HEBREW_REPLY = (
     "יש לי כמה שאלות חדשות:\n\n"
     "האם המכתב מהמעסיק החדש מספיק טוב?\n\n"
     "מחכה לאישורכם, מריאן\n\n"
-    "\u202bבתאריך שבת, 22 באוג׳ 2026 ב-12:31 מאת \u202aRan Farjun\u202c\u200f <\u202a\n"
-    "ranfa@amdocs.com\n"
+    "\u202bבתאריך שבת, 22 באוג׳ 2026 ב-12:31 מאת \u202aRotem Fargon\u202c\u200f <\u202a\n"
+    "rotem@law-fr.co.il\n"
     "\u202c\u200f>:\u202c\n\n"
     "שלום מריאן,\n\n"
     "1. משמעות המכתב: המכתב מבוסס על דיווח שנתקבל ברשות.\n\n"
@@ -97,8 +97,8 @@ def test_a_date_in_prose_is_not_a_quote_boundary():
 def test_gmail_english_attribution_may_wrap():
     text = (
         "Thanks for the update.\n\n"
-        "On Sat, 22 Aug 2026 at 12:31, Ran Farjun\n"
-        "<ranfa@amdocs.com> wrote:\n\n"
+        "On Sat, 22 Aug 2026 at 12:31, Rotem Fargon\n"
+        "<rotem@law-fr.co.il> wrote:\n\n"
         "Previous message body."
     )
     latest, trail = split_quotes(text)

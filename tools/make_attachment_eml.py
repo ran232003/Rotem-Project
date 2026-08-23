@@ -16,7 +16,7 @@ from pathlib import Path
 # from any working directory without the package on sys.path.
 OUT_DIR = Path(__file__).resolve().parents[1] / "out"
 
-SENDER = "mike232003@gmail.com"
+SENDER = "client@example.com"
 RECIPIENT = "rotem@law-fr.co.il"
 
 BODY = """רותם שלום,
