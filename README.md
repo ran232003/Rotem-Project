@@ -41,7 +41,10 @@ python -m rotem_agent.cli doctor --online
 `--online` additionally confirms the API accepts the key; `--no-outlook` skips
 the desktop checks. The exit code is non-zero when something is blocking.
 [docs/SETUP.md](docs/SETUP.md) is the same ground written for a non-technical
-user installing on the lawyer's own machine, and
+user installing on the lawyer's own machine, including how to update an existing
+install without losing the settings and the answered-message ledger, which are
+git-ignored and so absent from a fresh download. `update.ps1` does that copy for
+someone who installed from a ZIP rather than a clone. Also
 [docs/USAGE-he.md](docs/USAGE-he.md) is the day-to-day guide for the lawyer, in
 Hebrew: the icon, the switch, and what to check before sending.
 

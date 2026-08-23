@@ -59,11 +59,14 @@ is easy to miss and everything afterwards fails without it. Then click
 
 ## Step 2: Get the project onto the machine
 
-Either download it as a ZIP from GitHub and unzip it, or, if Git is installed:
+Use Git if it is installed, because it makes later updates a one-line job:
 
 ```powershell
-git clone https://github.com/<owner>/legal-email-agent.git
+git clone https://github.com/ran232003/Rotem-Project.git
 ```
+
+Otherwise download it as a ZIP from that page and unzip it. Git is worth the
+extra five minutes here; see "Updating to a newer version" at the end for why.
 
 Put the folder somewhere your own user account can write to, such as
 `C:\Users\<you>\Documents\legal-email-agent`. Do not put it in `Program Files`;
@@ -240,6 +243,54 @@ To see what has been spent:
 ```powershell
 .venv\Scripts\python.exe -m rotem_agent.cli usage
 ```
+
+---
+
+## Updating to a newer version
+
+Six things are deliberately not in the repository, because they hold either
+secrets or privileged material: `.env`, `config\mailbox.yaml`,
+`config\matters.yaml`, and the `state\`, `logs\` and `clients\` folders. Nothing
+that arrives from GitHub can overwrite them, which is what makes updating in
+place safe.
+
+If the project was cloned with Git, an update is two lines:
+
+```powershell
+git pull
+powershell -ExecutionPolicy Bypass -File setup.ps1
+```
+
+`setup.ps1` is safe to re-run: it reuses the existing environment, installs only
+what is missing, never touches a settings file that has been filled in, and
+refreshes the desktop icon. Turn the agent off from the dashboard first, so it is
+not running old code halfway through.
+
+If it was downloaded as a ZIP, unzip the new copy **next to** the old folder
+rather than over it. Then, from inside the new folder, point `update.ps1` at the
+old one:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File update.ps1 -From "C:\Users\<you>\Documents\old-copy"
+```
+
+That carries over the five things worth keeping — `.env`, both YAML settings
+files, and the `state\` and `clients\` folders — and then runs `setup.ps1` for
+you. Add `-DryRun` first to see what it would move without moving anything. The
+old `logs\` folder is left behind deliberately; it is only a diagnostic
+transcript, and a new one starts on the next run.
+
+It never overwrites a file already present in the new folder, so running it twice
+is safe. It also checks afterwards that `state\ledger.json` came across and says
+so loudly if it did not: that file is the record of which emails have already
+been answered, and without it the agent drafts a second reply to every one of
+them. Doing this copy by hand is where that gets forgotten, which is why the
+script exists.
+
+Delete the old folder once a draft has worked.
+
+A new version needs new packages only if `requirements.txt` changed. Re-running
+`setup.ps1` settles that either way, so there is no need to check.
 
 ---
 
