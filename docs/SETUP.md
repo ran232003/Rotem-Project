@@ -13,6 +13,9 @@ Allow about half an hour, most of which is waiting for downloads.
 icon on the desktop, **סוכן הטיוטות**, and turn the switch on. Everything below
 is the one-time installation.
 
+The day-to-day guide for the lawyer herself is [`USAGE-he.md`](USAGE-he.md), in
+Hebrew. Hand her that one, not this one.
+
 ---
 
 ## Before you start
