@@ -243,8 +243,15 @@ copy config\mailbox.example.yaml config\mailbox.yaml
 
 `allowed_senders` in that file is a hard boundary, not a filter for convenience.
 Every read path checks it before returning a message, so pointing the agent at a
-mailbox that also holds unrelated mail cannot expose that mail. `config/mailbox.yaml`
-is git-ignored because it names real mailboxes.
+mailbox that also holds unrelated mail cannot expose that mail. An empty list is
+rejected rather than treated as "everything". `config/mailbox.yaml` is
+git-ignored because it names real mailboxes.
+
+The watcher re-reads the list every pass, so adding a client takes effect within
+one interval and needs no restart. A file caught mid-edit keeps the previous list
+and logs it: emptying the boundary because someone saved a half-written line is a
+worse failure than a stale one. An explicit `--sender` is left fixed, being a
+deliberate narrowing for a single run.
 
 ```bash
 python -m rotem_agent.cli outlook-scan  --sender client@example.com

@@ -15,6 +15,11 @@ from rotem_agent.state import DraftLedger, LedgerEntry, message_key, utc_now
 _STOP_POLL_SECONDS = 1.0
 
 
+# The allowlist is resolved once per cycle rather than held, so adding a client
+# to config/mailbox.yaml takes effect without stopping the agent.
+Senders = Sequence[str] | Callable[[], Sequence[str]]
+
+
 @dataclass(frozen=True)
 class WatchOptions:
     save: bool = False
@@ -76,10 +81,14 @@ def key_for(match: FoundMessage) -> str:
     return message_key(match.message_id, match.conversation_id, str(match.received or ""))
 
 
+def resolve_senders(senders: Senders) -> list[str]:
+    return list(senders() if callable(senders) else senders)
+
+
 def run_cycle(
     box: OutlookMailbox,
     ledger: DraftLedger,
-    senders: Sequence[str],
+    senders: Senders,
     draft_fn: Callable[..., object],
     options: WatchOptions,
     log: Callable[[str], None] = print,
@@ -89,7 +98,7 @@ def run_cycle(
     """One pass: find unanswered mail from the allowed senders and draft it."""
     ledger.reload()
     matches: list[FoundMessage] = []
-    for sender in senders:
+    for sender in resolve_senders(senders):
         matches.extend(box.messages_from(sender, limit=50))
 
     pending = select_pending(
@@ -148,7 +157,7 @@ def run_cycle(
 def watch(
     box: OutlookMailbox,
     ledger: DraftLedger,
-    senders: Sequence[str],
+    senders: Senders,
     draft_fn: Callable[..., object],
     options: WatchOptions,
     log: Callable[[str], None] = print,

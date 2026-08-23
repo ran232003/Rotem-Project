@@ -9,6 +9,7 @@ from rotem_agent.watch import (
     as_datetime,
     backlog_cutoff,
     key_for,
+    run_cycle,
     select_pending,
     watch,
 )
@@ -192,3 +193,46 @@ def test_without_a_stop_it_runs_every_requested_cycle(tmp_path):
           WatchOptions(interval_seconds=1), log=lambda m: None, sleep=lambda s: None,
           should_stop=lambda: False, max_cycles=3)
     assert box.cycles == 3
+
+
+class _NamingBox:
+    """Records which addresses each cycle asked about."""
+
+    def __init__(self):
+        self.asked = []
+
+    def messages_from(self, sender, limit=50):
+        self.asked.append(sender)
+        return []
+
+
+def test_a_fixed_list_is_still_accepted(tmp_path):
+    box = _NamingBox()
+    run_cycle(box, _ledger(tmp_path), ["a@x.com", "b@x.com"], lambda **k: None,
+              WatchOptions(), log=lambda m: None)
+    assert box.asked == ["a@x.com", "b@x.com"]
+
+
+def test_an_address_added_mid_run_is_picked_up_without_a_restart(tmp_path):
+    """The whole point: she should not have to stop the agent to add a client."""
+    box = _NamingBox()
+    listed = ["a@x.com"]
+
+    watch(box, _ledger(tmp_path), lambda: listed, lambda **k: None,
+          WatchOptions(interval_seconds=1), log=lambda m: None,
+          sleep=lambda s: listed.append("b@x.com") if len(listed) == 1 else None,
+          should_stop=lambda: False, max_cycles=2)
+
+    assert box.asked == ["a@x.com", "a@x.com", "b@x.com"]
+
+
+def test_a_removed_address_stops_being_read(tmp_path):
+    box = _NamingBox()
+    listed = ["a@x.com", "b@x.com"]
+
+    watch(box, _ledger(tmp_path), lambda: listed, lambda **k: None,
+          WatchOptions(interval_seconds=1), log=lambda m: None,
+          sleep=lambda s: listed.remove("b@x.com") if "b@x.com" in listed else None,
+          should_stop=lambda: False, max_cycles=2)
+
+    assert box.asked == ["a@x.com", "b@x.com", "a@x.com"]

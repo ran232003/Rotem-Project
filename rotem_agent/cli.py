@@ -885,6 +885,31 @@ def _run_outlook_watch(args) -> int:
         guard.release()
 
 
+def _live_senders(initial: list[str], log=print):
+    """Re-read the allowlist each cycle, keeping the last good one on a bad edit.
+
+    Adding a client should not mean stopping the agent, and someone editing the
+    file while it runs will sometimes save a half-finished line. Falling back to
+    the previous list makes that a logged nuisance instead of a watcher that
+    either crashes or quietly starts watching nobody.
+    """
+    current = list(initial)
+
+    def provide() -> list[str]:
+        nonlocal current
+        try:
+            fresh = list(load_mailbox_config().allowed_senders)
+        except Exception as exc:
+            log(f"  could not re-read the allowlist, keeping the current one: {exc}")
+            return current
+        if {s.strip().lower() for s in fresh} != {s.strip().lower() for s in current}:
+            log(f"  allowlist changed, now watching: {', '.join(fresh)}")
+            current = fresh
+        return current
+
+    return provide
+
+
 def _watch_loop(args) -> int:
     config = load_mailbox_config()
     senders = args.sender or config.allowed_senders
@@ -892,6 +917,10 @@ def _watch_loop(args) -> int:
     if unknown:
         print(f"Not in allowed_senders: {', '.join(unknown)}", file=sys.stderr)
         return 2
+
+    # An explicit --sender is a deliberate narrowing for one run, so leave it
+    # fixed; only the configured list is treated as something that can change.
+    watched = senders if args.sender else _live_senders(senders)
 
     box = _mailbox()
     ledger = DraftLedger()
@@ -906,6 +935,8 @@ def _watch_loop(args) -> int:
     )
 
     print(f"Watching {', '.join(senders)}")
+    if not args.sender:
+        print("The allowlist is re-read each pass; adding an address needs no restart.")
     print(f"Ledger holds {len(ledger)} answered message(s) at {ledger.path}")
     if not args.save:
         print("Dry run: no drafts will be written. Pass --save to create them.")
@@ -950,7 +981,7 @@ def _watch_loop(args) -> int:
         retriever = None
     if args.once:
         created = len(
-            run_cycle(box, ledger, senders, drafter, options, print, retriever, emitter)
+            run_cycle(box, ledger, watched, drafter, options, print, retriever, emitter)
         )
     else:
         print(f"Polling every {args.interval}s. Press Ctrl+C to stop.")
@@ -958,7 +989,7 @@ def _watch_loop(args) -> int:
             created = watch(
                 box,
                 ledger,
-                senders,
+                watched,
                 drafter,
                 options,
                 retrieve_fn=retriever,
