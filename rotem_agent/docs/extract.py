@@ -4,10 +4,15 @@ import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from rotem_agent.docs.ocr import IMAGE_MIME, Ocr
+
 TEXT_SUFFIXES = {".txt", ".md", ".csv"}
 PDF_SUFFIXES = {".pdf"}
 DOCX_SUFFIXES = {".docx"}
-SUPPORTED = TEXT_SUFFIXES | PDF_SUFFIXES | DOCX_SUFFIXES
+# A client photographing a certificate is the normal case, so an image is a
+# document here rather than an unsupported file.
+IMAGE_SUFFIXES = set(IMAGE_MIME)
+SUPPORTED = TEXT_SUFFIXES | PDF_SUFFIXES | DOCX_SUFFIXES | IMAGE_SUFFIXES
 
 # Below this many characters per page, a PDF is almost certainly a scan with no
 # text layer. Immigration files are full of them: certificates, apostilles and
@@ -22,6 +27,12 @@ class ExtractedDoc:
     content_hash: str
     pages: int = 0
     needs_ocr: bool = False
+    # Transcribed by a model rather than read from a text layer. A name or date
+    # from such a document is evidence of what the machine saw, not of what the
+    # certificate says, and must be confirmed against the original before any
+    # discrepancy is asserted.
+    machine_read: bool = False
+    ocr_usage: object | None = None
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -33,15 +44,59 @@ def is_supported(path: Path) -> bool:
     return path.suffix.lower() in SUPPORTED
 
 
-def extract_file(path: Path) -> ExtractedDoc:
+def extract_file(path: Path, ocr: Ocr | None = None) -> ExtractedDoc:
     suffix = path.suffix.lower()
     if suffix in TEXT_SUFFIXES:
         return _extract_text(path)
     if suffix in PDF_SUFFIXES:
-        return _extract_pdf(path)
+        return _transcribe_if_needed(_extract_pdf(path), ocr)
     if suffix in DOCX_SUFFIXES:
         return _extract_docx(path)
+    if suffix in IMAGE_SUFFIXES:
+        return _extract_image(path, ocr)
     raise ValueError(f"Unsupported file type: {path.suffix}")
+
+
+def _transcribe_if_needed(document: ExtractedDoc, ocr: Ocr | None) -> ExtractedDoc:
+    """A PDF with a text layer is never re-read: the layer is the better source."""
+    if not document.needs_ocr or ocr is None:
+        return document
+
+    result = ocr.read(document.path, pages=document.pages)
+    document.warnings.extend(result.warnings)
+    if not result.ok:
+        return document
+
+    document.text = result.text
+    document.needs_ocr = False
+    document.machine_read = True
+    document.ocr_usage = result.usage
+    return document
+
+
+def _extract_image(path: Path, ocr: Ocr | None) -> ExtractedDoc:
+    digest = file_hash(path)
+    if ocr is None:
+        return ExtractedDoc(
+            path=path,
+            text="",
+            content_hash=digest,
+            pages=1,
+            needs_ocr=True,
+            warnings=["an image holds no text layer and needs OCR to be searchable"],
+        )
+
+    result = ocr.read(path, pages=1)
+    return ExtractedDoc(
+        path=path,
+        text=result.text,
+        content_hash=digest,
+        pages=1,
+        needs_ocr=not result.ok,
+        machine_read=result.ok,
+        ocr_usage=result.usage,
+        warnings=list(result.warnings),
+    )
 
 
 def file_hash(path: Path) -> str:

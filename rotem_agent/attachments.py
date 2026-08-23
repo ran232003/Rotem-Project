@@ -8,6 +8,8 @@ from pathlib import Path
 
 from rotem_agent.docs.chunk import chunk_text
 from rotem_agent.docs.extract import extract_file, is_supported
+from rotem_agent.docs.ocr import Ocr
+from rotem_agent.llm.base import LlmUsage
 from rotem_agent.retrieval.bm25 import Bm25
 from rotem_agent.retrieval.hebrew import index_terms
 
@@ -24,6 +26,7 @@ class AttachmentExcerpt:
     citation: str
     text: str
     filename: str
+    machine_read: bool = False
 
 
 def excerpts_from_files(
@@ -31,6 +34,8 @@ def excerpts_from_files(
     query: str = "",
     *,
     max_chunks_per_file: int = 4,
+    ocr: Ocr | None = None,
+    usage: list[LlmUsage] | None = None,
 ) -> tuple[list[AttachmentExcerpt], list[str]]:
     """Read attachments into excerpts, keeping the passages most like the email.
 
@@ -38,6 +43,10 @@ def excerpts_from_files(
     pages would favour letterheads and cover pages. Ranking the chunks against
     the email text costs nothing and keeps the passages that bear on what was
     actually asked.
+
+    Scans are transcribed here without being asked for, unlike a bulk matter
+    ingest: an email carries a page or two, so the cost is bounded, and a client
+    who photographs a certificate and sends it expects the reply to address it.
     """
     excerpts: list[AttachmentExcerpt] = []
     notes: list[str] = []
@@ -47,16 +56,28 @@ def excerpts_from_files(
             notes.append(f"{path.name}: {path.suffix or 'no extension'} cannot be read yet")
             continue
 
-        document = extract_file(path)
+        document = extract_file(path, ocr=ocr)
+        if usage is not None and isinstance(document.ocr_usage, LlmUsage):
+            usage.append(document.ocr_usage)
+        for warning in document.warnings:
+            notes.append(f"{path.name}: {warning}")
         if document.needs_ocr:
             notes.append(
-                f"{path.name}: looks like a scan with no text layer, so its contents "
-                "are not available to the draft. Hebrew OCR is not wired up yet."
+                f"{path.name}: looks like a scan and could not be transcribed, so its "
+                "contents are not available to the draft."
+                if ocr is not None
+                else f"{path.name}: looks like a scan with no text layer, so its contents "
+                "are not available to the draft. Run with OCR enabled to read it."
             )
             continue
         if document.is_empty:
             notes.append(f"{path.name}: no extractable text")
             continue
+        if document.machine_read:
+            notes.append(
+                f"{path.name}: transcribed from a scan by machine. Names, dates and "
+                "numbers taken from it must be checked against the original."
+            )
 
         chunks = chunk_text(document.text)
         if not chunks:
@@ -64,9 +85,11 @@ def excerpts_from_files(
         for chunk in _most_relevant(chunks, query, max_chunks_per_file):
             excerpts.append(
                 AttachmentExcerpt(
-                    citation=f"{path.name}#{chunk.index}",
+                    citation=f"{path.name}#{chunk.index}"
+                    + (" (machine-read)" if document.machine_read else ""),
                     text=chunk.text,
                     filename=path.name,
+                    machine_read=document.machine_read,
                 )
             )
     return excerpts, notes

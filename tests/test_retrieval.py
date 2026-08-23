@@ -3,12 +3,27 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from pathlib import Path
+
+from rotem_agent.docs.ocr import OcrResult
 from rotem_agent.matters.registry import load_matter
 from rotem_agent.retrieval.embed import HashEmbedder, unit
 from rotem_agent.retrieval.hebrew import index_terms, tokens, variants
 from rotem_agent.retrieval.ingest import ingest_matter
 from rotem_agent.retrieval.search import search
 from rotem_agent.retrieval.store import ChunkStore
+
+
+class _StubOcr:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    @property
+    def name(self) -> str:
+        return "stub-ocr"
+
+    def read(self, path: Path, pages: int = 0) -> OcrResult:
+        return OcrResult(text=self.text, model=self.name)
 
 
 # ------------------------------------------------------------------ tokenising
@@ -96,10 +111,29 @@ def test_a_deleted_file_stops_being_retrievable(tmp_path):
 
 
 def test_unsupported_files_are_reported_not_indexed(tmp_path):
-    matter = _matter(tmp_path, {"scan.jpg": "not text"})
+    matter = _matter(tmp_path, {"bundle.zip": "not text"})
     with ChunkStore(tmp_path / "index.sqlite3") as store:
         summary = ingest_matter(matter, store, HashEmbedder(), log=lambda _: None)
-    assert summary.skipped == ["scan.jpg"] and not summary.added
+    assert summary.skipped == ["bundle.zip"] and not summary.added
+
+
+def test_a_scan_without_ocr_is_listed_as_needing_it(tmp_path):
+    """A bulk ingest does not spend on OCR unasked, so it must say what it skipped."""
+    matter = _matter(tmp_path, {"certificate.jpg": "a photograph, not text"})
+    with ChunkStore(tmp_path / "index.sqlite3") as store:
+        summary = ingest_matter(matter, store, HashEmbedder(), log=lambda _: None)
+    assert summary.needs_ocr == ["certificate.jpg"] and not summary.added
+
+
+def test_a_scan_is_indexed_and_recorded_as_machine_read_when_ocr_runs(tmp_path):
+    matter = _matter(tmp_path, {"certificate.jpg": "a photograph, not text"})
+    ocr = _StubOcr("תעודת לידה " * 40)
+    with ChunkStore(tmp_path / "index.sqlite3") as store:
+        summary = ingest_matter(matter, store, HashEmbedder(), log=lambda _: None, ocr=ocr)
+        assert summary.added == ["certificate.jpg"]
+        assert summary.machine_read == ["certificate.jpg"]
+        record = store.documents(matter.slug)[0]
+        assert record.machine_read is True and record.needs_ocr is False
 
 
 def test_nested_folders_are_indexed_with_relative_paths(tmp_path):

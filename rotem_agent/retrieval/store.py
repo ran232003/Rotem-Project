@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS documents (
     content_hash  TEXT NOT NULL,
     pages         INTEGER NOT NULL DEFAULT 0,
     needs_ocr     INTEGER NOT NULL DEFAULT 0,
+    machine_read  INTEGER NOT NULL DEFAULT 0,
     ingested_at   TEXT NOT NULL,
     UNIQUE (matter, rel_path)
 );
@@ -55,6 +56,7 @@ class DocumentRecord:
     pages: int
     needs_ocr: bool
     chunks: int
+    machine_read: bool = False
 
 
 class ChunkStore:
@@ -65,7 +67,23 @@ class ChunkStore:
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA foreign_keys = ON")
         self._connection.executescript(SCHEMA)
+        self._migrate()
         self._connection.commit()
+
+    def _migrate(self) -> None:
+        """Add columns the running code needs to an index built by older code.
+
+        Reindexing every matter to gain a column would mean re-embedding, and
+        re-running OCR, at real cost.
+        """
+        existing = {
+            row["name"]
+            for row in self._connection.execute("PRAGMA table_info(documents)").fetchall()
+        }
+        if "machine_read" not in existing:
+            self._connection.execute(
+                "ALTER TABLE documents ADD COLUMN machine_read INTEGER NOT NULL DEFAULT 0"
+            )
 
     def close(self) -> None:
         self._connection.close()
@@ -85,7 +103,7 @@ class ChunkStore:
     def documents(self, matter: str) -> list[DocumentRecord]:
         rows = self._connection.execute(
             """
-            SELECT d.rel_path, d.content_hash, d.pages, d.needs_ocr,
+            SELECT d.rel_path, d.content_hash, d.pages, d.needs_ocr, d.machine_read,
                    (SELECT COUNT(*) FROM chunks c WHERE c.document_id = d.id) AS chunks
             FROM documents d WHERE d.matter = ? ORDER BY d.rel_path
             """,
@@ -98,6 +116,7 @@ class ChunkStore:
                 pages=row["pages"],
                 needs_ocr=bool(row["needs_ocr"]),
                 chunks=row["chunks"],
+                machine_read=bool(row["machine_read"]),
             )
             for row in rows
         ]
@@ -112,6 +131,7 @@ class ChunkStore:
         needs_ocr: bool,
         chunks: list[tuple[int, str, int, int, list[str], np.ndarray | None]],
         embed_model: str,
+        machine_read: bool = False,
     ) -> None:
         with self._connection:
             self._connection.execute(
@@ -119,10 +139,19 @@ class ChunkStore:
             )
             cursor = self._connection.execute(
                 """
-                INSERT INTO documents (matter, rel_path, content_hash, pages, needs_ocr, ingested_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO documents
+                    (matter, rel_path, content_hash, pages, needs_ocr, machine_read, ingested_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (matter, rel_path, content_hash, pages, int(needs_ocr), utc_now()),
+                (
+                    matter,
+                    rel_path,
+                    content_hash,
+                    pages,
+                    int(needs_ocr),
+                    int(machine_read),
+                    utc_now(),
+                ),
             )
             document_id = cursor.lastrowid
             self._connection.executemany(

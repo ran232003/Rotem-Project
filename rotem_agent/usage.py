@@ -84,7 +84,10 @@ class UsageLog:
 
 @dataclass(frozen=True)
 class Totals:
-    drafts: int = 0
+    # Not all records are drafts. Transcribing a scan and running a document
+    # audit are metered here too, so counting them as drafts would report a
+    # per-draft average over things that never produced a reply.
+    records: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
     thinking_tokens: int = 0
@@ -99,7 +102,7 @@ class Totals:
 
     @property
     def priced(self) -> int:
-        return self.drafts - self.unpriced
+        return self.records - self.unpriced
 
     @property
     def average_usd(self) -> float | None:
@@ -117,7 +120,7 @@ def totals(records: list[UsageRecord], prices: PriceList) -> Totals:
         else:
             cost += amount
     return Totals(
-        drafts=len(records),
+        records=len(records),
         input_tokens=sum(r.input_tokens for r in records),
         output_tokens=sum(r.output_tokens for r in records),
         thinking_tokens=sum(r.thinking_tokens for r in records),

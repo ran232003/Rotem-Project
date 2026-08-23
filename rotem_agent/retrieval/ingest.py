@@ -6,6 +6,8 @@ from typing import Callable
 
 from rotem_agent.docs.chunk import chunk_text
 from rotem_agent.docs.extract import extract_file, file_hash, is_supported
+from rotem_agent.docs.ocr import Ocr
+from rotem_agent.llm.base import LlmUsage
 from rotem_agent.matters.registry import Matter
 from rotem_agent.retrieval.embed import Embedder
 from rotem_agent.retrieval.hebrew import index_terms
@@ -20,6 +22,8 @@ class IngestSummary:
     removed: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
     needs_ocr: list[str] = field(default_factory=list)
+    machine_read: list[str] = field(default_factory=list)
+    ocr_usage: list[LlmUsage] = field(default_factory=list)
     chunks: int = 0
 
     @property
@@ -34,6 +38,7 @@ def ingest_matter(
     *,
     log: Callable[[str], None] = print,
     force: bool = False,
+    ocr: Ocr | None = None,
 ) -> IngestSummary:
     summary = IngestSummary(matter=matter.slug)
     docs_dir = matter.docs_dir
@@ -56,9 +61,13 @@ def ingest_matter(
             summary.unchanged.append(rel_path)
             continue
 
-        document = extract_file(path)
+        document = extract_file(path, ocr=ocr)
         if document.needs_ocr:
             summary.needs_ocr.append(rel_path)
+        if document.machine_read:
+            summary.machine_read.append(rel_path)
+            if isinstance(document.ocr_usage, LlmUsage):
+                summary.ocr_usage.append(document.ocr_usage)
         for warning in document.warnings:
             log(f"  {rel_path}: {warning}")
 
@@ -73,6 +82,7 @@ def ingest_matter(
                 digest,
                 pages=document.pages,
                 needs_ocr=document.needs_ocr,
+                machine_read=document.machine_read,
                 chunks=[],
                 embed_model=embedder.name if embedder else "",
             )
@@ -95,6 +105,7 @@ def ingest_matter(
             digest,
             pages=document.pages,
             needs_ocr=document.needs_ocr,
+            machine_read=document.machine_read,
             chunks=[
                 (
                     piece.index,
@@ -110,7 +121,8 @@ def ingest_matter(
         )
         summary.added.append(rel_path)
         summary.chunks += len(pieces)
-        log(f"  {rel_path}: {len(pieces)} chunk(s)")
+        read_by = " (machine-read)" if document.machine_read else ""
+        log(f"  {rel_path}: {len(pieces)} chunk(s){read_by}")
 
     for rel_path in known:
         if rel_path not in seen:

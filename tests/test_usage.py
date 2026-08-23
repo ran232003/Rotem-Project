@@ -158,7 +158,7 @@ def test_totals_count_unpriced_drafts_apart():
                     input_tokens=1_000_000, output_tokens=0),
     ]
     result = totals(records, PRICES)
-    assert result.drafts == 2
+    assert result.records == 2
     assert result.unpriced == 1
     assert result.cost_usd == pytest.approx(1.0)
     # The average is over what could be priced, not over everything.
