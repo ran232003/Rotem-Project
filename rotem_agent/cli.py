@@ -12,12 +12,17 @@ from rotem_agent import logs, usage
 from rotem_agent.analysis.questions import extract_asks
 from rotem_agent.attachments import excerpts_from_files, safe_filename, save_eml_attachments
 from rotem_agent.config import OUT_DIR, ConfigError, load_settings
+from rotem_agent.control import clear_stop
+from rotem_agent.dashboard import serve
 from rotem_agent.doctor import FAIL, format_report, run_all
 from rotem_agent.drafting.composer import compose, render_draft_html, render_internal_note
 from rotem_agent.llm.gemini import GeminiClient
 from rotem_agent.lock import AlreadyRunning, SingleInstance
 from rotem_agent.mailparse.parser import ParsedEmail, parse_eml
 from rotem_agent.matters import MatterRegistry, load_matters_root
+from rotem_agent.outcomes import DEFAULT_DAYS as OUTCOME_DAYS
+from rotem_agent.outcomes import refresh as refresh_outcomes
+from rotem_agent.outcomes import save as save_outcomes
 from rotem_agent.outlook import OutlookError, OutlookMailbox, load_mailbox_config
 from rotem_agent.pricing import format_money, format_usd, load_prices
 from rotem_agent.retrieval import ChunkStore, GeminiEmbedder, ingest_matter, search
@@ -163,6 +168,20 @@ def main(argv: list[str] | None = None) -> int:
     search_cmd.add_argument("--top", type=int, default=6)
     search_cmd.add_argument("--no-embed", action="store_true")
 
+    board_cmd = sub.add_parser(
+        "dashboard", help="Open the local page showing what the agent has done"
+    )
+    board_cmd.add_argument("--port", type=int, default=8765)
+    board_cmd.add_argument(
+        "--interval", type=int, default=60, help="Poll interval for a watcher started here"
+    )
+    board_cmd.add_argument("--no-browser", action="store_true")
+
+    outcomes_cmd = sub.add_parser(
+        "outcomes", help="Check Sent Items to see which drafts were actually sent"
+    )
+    outcomes_cmd.add_argument("--days", type=int, default=OUTCOME_DAYS)
+
     doctor_cmd = sub.add_parser(
         "doctor", help="Check this machine is set up correctly and say what is missing"
     )
@@ -215,6 +234,10 @@ def main(argv: list[str] | None = None) -> int:
             return _run_outlook_demo(args)
         if args.command == "doctor":
             return _run_doctor(args)
+        if args.command == "dashboard":
+            return _run_dashboard(args)
+        if args.command == "outcomes":
+            return _run_outcomes(args)
         return _run_draft(args)
     except (ConfigError, OutlookError) as exc:
         print(f"\nError: {exc}", file=sys.stderr)
@@ -225,6 +248,40 @@ def main(argv: list[str] | None = None) -> int:
         # been closed hours ago.
         logs.logger().exception("unhandled error running %s", args.command)
         raise
+
+
+def _run_dashboard(args: argparse.Namespace) -> int:
+    serve(
+        port=args.port,
+        interval_seconds=args.interval,
+        open_browser=not args.no_browser,
+    )
+    return 0
+
+
+def _run_outcomes(args: argparse.Namespace) -> int:
+    """Refresh the record of which drafts were followed by a sent reply."""
+    box = _mailbox()
+    result = refresh_outcomes(box, days=args.days)
+    save_outcomes(result)
+
+    ledger = DraftLedger()
+    entries = ledger.entries()
+    sent = sum(
+        1
+        for e in entries
+        if result.was_sent(e.get("conversation_id"), str(e.get("drafted_at", "")))
+    )
+    unknown = sum(
+        1
+        for e in entries
+        if result.was_sent(e.get("conversation_id"), str(e.get("drafted_at", ""))) is None
+    )
+
+    print(f"Sent Items scanned back {args.days} day(s): {len(result.conversations)} conversation(s)")
+    print(f"Drafts: {len(entries)} written, {sent} followed by a sent reply", end="")
+    print(f", {unknown} unknown" if unknown else "")
+    return 0
 
 
 def _run_doctor(args: argparse.Namespace) -> int:
@@ -818,9 +875,13 @@ def _run_outlook_watch(args) -> int:
             file=sys.stderr,
         )
         return 3
+    # A stop left behind by a watcher that was killed rather than asked would
+    # otherwise stop this one on its first cycle, which reads as a broken start.
+    clear_stop()
     try:
         return _watch_loop(args)
     finally:
+        clear_stop()
         guard.release()
 
 

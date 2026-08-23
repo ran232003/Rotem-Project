@@ -9,6 +9,10 @@ stops. Every draft waits for a human to read, change and send it.
 
 Allow about half an hour, most of which is waiting for downloads.
 
+**Once it is set up, using it is one thing:** double-click the green envelope
+icon on the desktop, **סוכן הטיוטות**, and turn the switch on. Everything below
+is the one-time installation.
+
 ---
 
 ## Before you start
@@ -72,9 +76,12 @@ powershell -ExecutionPolicy Bypass -File setup.ps1
 ```
 
 It creates a private Python environment inside the folder, installs everything
-needed, and creates the two settings files from their examples. It is safe to
-run again if something goes wrong; it never overwrites settings you have
-already filled in.
+needed, creates the two settings files from their examples, and puts an icon on
+the desktop named **סוכן הטיוטות**. It is safe to run again if something goes
+wrong; it never overwrites settings you have already filled in.
+
+The icon is how the agent gets used day to day, but it will not work until the
+settings in the next step are filled in.
 
 ## Step 4: Fill in the settings
 
@@ -156,15 +163,50 @@ Outlook appends the firm's signature when the draft is opened.
 
 ## Step 8: Let it watch for new mail
 
-Once the drafts are consistently good:
+Once the drafts are consistently good, the agent can watch the mailbox and draft
+a reply to each new message from an allowed sender, once and only once.
+
+The easy way is the dashboard. Setup put a green envelope icon named **סוכן
+הטיוטות** on the desktop — double-click it. A page opens in the browser with a
+switch to turn the agent on and off, and figures for how many emails have been
+answered, how many of those replies were actually sent, and what it has cost.
+
+The first click takes a few seconds while it starts up. Double-clicking the icon
+again when the dashboard is already open just brings the page back, so there is
+no harm in it.
+
+A small console window appears in the taskbar. That window *is* the dashboard —
+leave it alone. Closing it closes the dashboard, not the agent; the agent keeps
+running until it is switched off from the page.
+
+If the icon is missing, run `setup.ps1` again, or double-click **`dashboard.bat`**
+in the project folder, which is exactly what the icon points at.
+
+Outlook must stay open for the agent to work at all.
+
+If you prefer the command line, this does the same thing without the page:
 
 ```powershell
 .venv\Scripts\python.exe -m rotem_agent.cli outlook-watch --save --interval 60
 ```
 
-It checks for new mail every minute and drafts a reply to each new message from
-an allowed sender, once and only once. Leave the window open; close it to stop.
-Outlook must stay open too.
+### About the switch
+
+Turning the agent off is a request, not a kill. If it is halfway through writing
+a reply it finishes that one first, which normally takes a second or two. This
+is deliberate: interrupting it could leave half a reply sitting in Drafts.
+
+Very occasionally the agent will not respond to the request, usually because it
+was left running from before an update. After a minute and a half the page
+offers a forced shutdown, which should be used only then.
+
+### About the sent figures
+
+"Sent" counts threads where a reply actually went out after the agent drafted
+one. A reply rewritten from scratch still counts, because the question being
+answered is whether the draft was a useful starting point or was thrown away.
+The figure is a snapshot and the page says when it was last taken; the refresh
+button under the table takes a new one.
 
 ---
 

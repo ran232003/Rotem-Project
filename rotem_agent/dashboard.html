@@ -1,0 +1,471 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>סוכן הטיוטות</title>
+    <style>
+      :root {
+        --bg: #f4f5f7;
+        --card: #ffffff;
+        --ink: #1d2129;
+        --muted: #6b7280;
+        --line: #e4e6ea;
+        --on: #15803d;
+        --on-soft: #dcfce7;
+        --off: #6b7280;
+        --off-soft: #eceef1;
+        --warn: #b45309;
+        --warn-soft: #fef3c7;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 28px 20px 48px;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: "Segoe UI", Arial, sans-serif;
+        font-size: 15px;
+        line-height: 1.6;
+      }
+      .wrap {
+        max-width: 940px;
+        margin: 0 auto;
+      }
+      h1 {
+        font-size: 22px;
+        margin: 0 0 22px;
+        font-weight: 600;
+      }
+
+      .panel {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 20px 22px;
+      }
+
+      .switch {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+        flex-wrap: wrap;
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 9px;
+        padding: 7px 16px;
+        border-radius: 999px;
+        font-weight: 600;
+        font-size: 15px;
+      }
+      .pill.on {
+        background: var(--on-soft);
+        color: var(--on);
+      }
+      .pill.off {
+        background: var(--off-soft);
+        color: var(--off);
+      }
+      .pill.busy {
+        background: var(--warn-soft);
+        color: var(--warn);
+      }
+      .dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: currentColor;
+      }
+
+      button {
+        font: inherit;
+        font-weight: 600;
+        padding: 11px 26px;
+        border-radius: 9px;
+        border: 1px solid transparent;
+        cursor: pointer;
+        transition: filter 0.15s;
+      }
+      button:hover:not(:disabled) {
+        filter: brightness(0.95);
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      .primary {
+        background: var(--on);
+        color: #fff;
+      }
+      .secondary {
+        background: #fff;
+        color: var(--ink);
+        border-color: #cbd0d6;
+      }
+      .detail {
+        color: var(--muted);
+        font-size: 13.5px;
+        margin-inline-start: auto;
+      }
+
+      .cards {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 14px;
+        margin: 14px 0;
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 16px 18px;
+      }
+      .card h2 {
+        margin: 0 0 12px;
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--muted);
+        letter-spacing: 0.2px;
+      }
+      .big {
+        font-size: 30px;
+        font-weight: 650;
+        line-height: 1.15;
+      }
+      .under {
+        color: var(--muted);
+        font-size: 13px;
+        margin-top: 6px;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 6px;
+      }
+      th,
+      td {
+        text-align: right;
+        padding: 10px 8px;
+        border-bottom: 1px solid var(--line);
+      }
+      th {
+        font-size: 12.5px;
+        color: var(--muted);
+        font-weight: 600;
+      }
+      td {
+        font-size: 14px;
+        vertical-align: top;
+      }
+      tbody tr:last-child td {
+        border-bottom: none;
+      }
+      .subject {
+        max-width: 340px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .tag {
+        font-size: 12px;
+        padding: 2px 9px;
+        border-radius: 999px;
+        white-space: nowrap;
+      }
+      .tag.yes {
+        background: var(--on-soft);
+        color: var(--on);
+      }
+      .tag.no {
+        background: var(--off-soft);
+        color: var(--off);
+      }
+      .tag.flag {
+        background: var(--warn-soft);
+        color: var(--warn);
+      }
+      .ltr {
+        direction: ltr;
+        unicode-bidi: embed;
+        display: inline-block;
+      }
+
+      .foot {
+        color: var(--muted);
+        font-size: 12.5px;
+        margin-top: 16px;
+        display: flex;
+        gap: 14px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+      .empty {
+        color: var(--muted);
+        padding: 22px 4px;
+      }
+      @media (max-width: 720px) {
+        .cards {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>דשבורד</h1>
+
+      <div class="panel">
+        <div class="switch">
+          <span id="pill" class="pill off"
+            ><span class="dot"></span><span id="pillText">טוען…</span></span
+          >
+          <button id="toggle" class="primary" disabled>—</button>
+          <button id="force" class="secondary" hidden>כיבוי מאולץ</button>
+          <span id="detail" class="detail"></span>
+        </div>
+      </div>
+
+      <div class="cards">
+        <div class="card">
+          <h2>היום</h2>
+          <div id="d-today" class="big">–</div>
+          <div id="u-today" class="under"></div>
+        </div>
+        <div class="card">
+          <h2>שבעת הימים האחרונים</h2>
+          <div id="d-week" class="big">–</div>
+          <div id="u-week" class="under"></div>
+        </div>
+        <div class="card">
+          <h2>שלושים הימים האחרונים</h2>
+          <div id="d-month" class="big">–</div>
+          <div id="u-month" class="under"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2 style="margin: 0 0 10px; font-size: 15px">טיוטות אחרונות</h2>
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 112px">מתי</th>
+              <th style="width: 190px">מאת</th>
+              <th>נושא</th>
+              <th style="width: 88px">נשלח</th>
+              <th style="width: 88px">עלות</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+        <div id="none" class="empty" hidden>עוד לא נוצרו טיוטות.</div>
+        <div class="foot">
+          <button
+            id="refresh"
+            class="secondary"
+            style="padding: 7px 16px; font-size: 13.5px"
+          >
+            רענון נתוני שליחה
+          </button>
+          <span id="sentNote"></span>
+        </div>
+      </div>
+
+      <div class="foot"><span id="note"></span></div>
+    </div>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      let busy = false;
+      let running = false;
+
+      const nf = new Intl.NumberFormat("he-IL");
+
+      function money(usd, ils) {
+        if (usd === null || usd === undefined) return "—";
+        if (ils !== null && ils !== undefined) return "₪" + ils.toFixed(2);
+        return "$" + (usd < 0.01 ? usd.toFixed(4) : usd.toFixed(2));
+      }
+
+      function when(iso) {
+        if (!iso) return "—";
+        const d = new Date(iso);
+        if (isNaN(d)) return "—";
+        const today = new Date();
+        const sameDay = d.toDateString() === today.toDateString();
+        const time = d.toLocaleTimeString("he-IL", {
+          hour: "2-digit",
+          minute: "2-digit",
+        });
+        return sameDay
+          ? time
+          : d.toLocaleDateString("he-IL", {
+              day: "2-digit",
+              month: "2-digit",
+            }) +
+              " " +
+              time;
+      }
+
+      function tag(text, kind) {
+        const s = document.createElement("span");
+        s.className = "tag " + kind;
+        s.textContent = text;
+        return s;
+      }
+
+      function card(prefix, w) {
+        $("d-" + prefix).textContent = nf.format(w.answered);
+        const bits = [];
+        if (w.sent !== null && w.sent !== undefined)
+          bits.push(`נשלחו ${nf.format(w.sent)}`);
+        bits.push(money(w.cost_usd, w.cost_ils));
+        const tokens = w.input_tokens + w.output_tokens;
+        if (tokens) bits.push(`${nf.format(tokens)} טוקנים`);
+        $("u-" + prefix).textContent = bits.join(" · ");
+      }
+
+      function paint(s) {
+        running = s.watcher.running;
+        const stopping = s.watcher.stopping;
+
+        const pill = $("pill");
+        pill.className = "pill " + (stopping ? "busy" : running ? "on" : "off");
+        $("pillText").textContent = stopping
+          ? "נכבה…"
+          : running
+            ? "פעיל"
+            : "כבוי";
+
+        const btn = $("toggle");
+        btn.textContent = running ? "כיבוי" : "הפעלה";
+        btn.className = running ? "secondary" : "primary";
+        btn.disabled = busy || stopping;
+
+        // A stop the agent never acts on would otherwise leave her stuck on "נכבה…"
+        // with a disabled button and no way out.
+        const stuck = stopping && (s.watcher.stop_pending_seconds || 0) > 90;
+        $("force").hidden = !stuck;
+
+        $("detail").textContent = stuck
+          ? "הסוכן אינו מגיב לבקשת הכיבוי. אפשר לכבות אותו בכוח."
+          : running
+            ? s.watcher.since
+              ? "פועל מאז " + when(s.watcher.since)
+              : "פועל"
+            : "הסוכן אינו פועל. לא ייווצרו טיוטות חדשות.";
+
+        card("today", s.windows.today);
+        card("week", s.windows.week);
+        card("month", s.windows.month);
+
+        const body = $("rows");
+        body.replaceChildren();
+        for (const r of s.recent) {
+          const tr = document.createElement("tr");
+
+          const t = document.createElement("td");
+          t.textContent = when(r.at);
+          tr.appendChild(t);
+
+          const from = document.createElement("td");
+          const span = document.createElement("span");
+          span.className = "ltr";
+          span.textContent = r.sender || "—";
+          from.appendChild(span);
+          tr.appendChild(from);
+
+          const subj = document.createElement("td");
+          subj.className = "subject";
+          subj.title = r.subject || "";
+          subj.textContent = r.subject || "—";
+          if (!r.ok || (r.problems && r.problems.length)) {
+            subj.appendChild(document.createTextNode(" "));
+            const f = tag("לבדיקה", "flag");
+            f.title = (r.problems || []).join("\n");
+            subj.appendChild(f);
+          }
+          tr.appendChild(subj);
+
+          const sent = document.createElement("td");
+          if (r.sent === true) sent.appendChild(tag("נשלח", "yes"));
+          else if (r.sent === false) sent.appendChild(tag("לא נשלח", "no"));
+          else sent.textContent = "—";
+          tr.appendChild(sent);
+
+          const cost = document.createElement("td");
+          cost.textContent =
+            r.cost_usd === null || r.cost_usd === undefined
+              ? "—"
+              : "$" + r.cost_usd.toFixed(4);
+          tr.appendChild(cost);
+
+          body.appendChild(tr);
+        }
+        $("none").hidden = s.recent.length > 0;
+
+        $("sentNote").textContent = s.refreshing
+          ? "בודק תיקיית 'נשלחו'…"
+          : s.outcomes_known
+            ? "נתוני שליחה נכונים ל־" + when(s.outcomes_refreshed_at)
+            : "נתוני השליחה טרם נבדקו.";
+
+        $("note").textContent = s.currency_note ? "" : "";
+      }
+
+      async function load() {
+        try {
+          const res = await fetch("/api/status");
+          paint(await res.json());
+        } catch (e) {
+          $("pillText").textContent = "אין חיבור";
+          $("pill").className = "pill busy";
+          $("toggle").disabled = true;
+        }
+      }
+
+      async function post(path) {
+        busy = true;
+        $("toggle").disabled = true;
+        // Starting takes several seconds while the agent loads. Without this the
+        // page sits on "כבוי" and looks like the button did nothing.
+        if (path === "/api/start") {
+          $("pill").className = "pill busy";
+          $("pillText").textContent = "מופעל…";
+          $("detail").textContent = "";
+        }
+        try {
+          const res = await fetch(path, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+          });
+          paint(await res.json());
+        } finally {
+          busy = false;
+          load();
+        }
+      }
+
+      $("toggle").addEventListener("click", () =>
+        post(running ? "/api/stop" : "/api/start"),
+      );
+      $("force").addEventListener("click", () => {
+        if (
+          confirm(
+            "לכבות את הסוכן בכוח? טיוטה שנמצאת באמצע כתיבה עלולה ללכת לאיבוד.",
+          )
+        ) {
+          post("/api/force-stop");
+        }
+      });
+      $("refresh").addEventListener("click", () => post("/api/refresh"));
+
+      load();
+      setInterval(load, 4000);
+    </script>
+  </body>
+</html>

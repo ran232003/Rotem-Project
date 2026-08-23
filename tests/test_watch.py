@@ -4,7 +4,14 @@ from datetime import datetime, timedelta, timezone
 
 from rotem_agent.outlook.com import FoundMessage
 from rotem_agent.state import DraftLedger, LedgerEntry, message_key
-from rotem_agent.watch import as_datetime, backlog_cutoff, key_for, select_pending
+from rotem_agent.watch import (
+    WatchOptions,
+    as_datetime,
+    backlog_cutoff,
+    key_for,
+    select_pending,
+    watch,
+)
 
 NOW = datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc)
 
@@ -124,3 +131,64 @@ def test_as_datetime_assumes_utc_for_naive_values():
     assert as_datetime(datetime(2026, 8, 22, 12, 0)).tzinfo is timezone.utc
     assert as_datetime(None) is None
     assert as_datetime("not a date") is None
+
+
+class _QuietBox:
+    """A mailbox with nothing in it, so a cycle is a no-op."""
+
+    def __init__(self):
+        self.cycles = 0
+
+    def messages_from(self, sender, limit=50):
+        self.cycles += 1
+        return []
+
+
+def test_a_stop_asked_for_up_front_means_no_cycle_runs(tmp_path):
+    box = _QuietBox()
+    watch(box, _ledger(tmp_path), ["client@gmail.com"], lambda **k: None,
+          WatchOptions(), log=lambda m: None, sleep=lambda s: None,
+          should_stop=lambda: True)
+    assert box.cycles == 0
+
+
+def test_a_stop_during_the_wait_ends_the_loop(tmp_path):
+    """The current message finishes; the next one is never started."""
+    box = _QuietBox()
+    stopped = {"yes": False}
+
+    def sleep(_seconds):
+        stopped["yes"] = True
+
+    watch(box, _ledger(tmp_path), ["client@gmail.com"], lambda **k: None,
+          WatchOptions(interval_seconds=5), log=lambda m: None, sleep=sleep,
+          should_stop=lambda: stopped["yes"])
+
+    assert box.cycles == 1
+
+
+def test_the_wait_is_sliced_so_a_stop_is_not_a_minute_late(tmp_path):
+    """A single sixty second sleep would make the off button look broken."""
+    slices = []
+    box = _QuietBox()
+
+    watch(box, _ledger(tmp_path), ["client@gmail.com"], lambda **k: None,
+          WatchOptions(interval_seconds=5), log=lambda m: None,
+          sleep=slices.append, should_stop=lambda: False, max_cycles=1)
+
+    assert slices == []  # max_cycles exits before waiting
+
+    watch(box, _ledger(tmp_path), ["client@gmail.com"], lambda **k: None,
+          WatchOptions(interval_seconds=5), log=lambda m: None,
+          sleep=slices.append, should_stop=lambda: False, max_cycles=2)
+
+    assert max(slices) <= 1.0
+    assert sum(slices) == 5.0
+
+
+def test_without_a_stop_it_runs_every_requested_cycle(tmp_path):
+    box = _QuietBox()
+    watch(box, _ledger(tmp_path), ["client@gmail.com"], lambda **k: None,
+          WatchOptions(interval_seconds=1), log=lambda m: None, sleep=lambda s: None,
+          should_stop=lambda: False, max_cycles=3)
+    assert box.cycles == 3

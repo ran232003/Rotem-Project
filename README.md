@@ -296,6 +296,62 @@ A caution on corporate mailboxes: message text is sent to the Gemini API, so
 running this against an employer's mail may breach their acceptable-use or data
 protection policy regardless of how the allowlist is set. Use it on mail you own.
 
+## The dashboard
+
+```bash
+python -m rotem_agent.cli dashboard
+```
+
+On the lawyer's machine this is a desktop icon instead: `setup.ps1` writes a
+shortcut to `dashboard.bat`, drawn with `tools/make_icon.py` so it does not
+inherit the generic batch-file icon, and set to open minimised so the console
+window that hosts it stays out of the way.
+
+A page on `127.0.0.1:8765` with a switch to start and stop the agent, counts of
+emails answered and replies sent, and what has been spent today, this week and
+this month. It is built on the standard library: no framework, no build step,
+nothing to install beyond what the agent already needs, because every dependency
+is something that can fail during setup on a machine where nobody can diagnose
+it. It binds to loopback only, since the page lists client names and subjects.
+
+Four properties are less obvious than they look.
+
+**A second launch shows the page rather than binding.** Double-clicking the icon
+again is how anyone checks whether the dashboard is open. The port is probed
+before binding because `socketserver` sets `SO_REUSEADDR` by default and Windows
+grants it literally: a second bind on a live port succeeds, and requests then
+land on whichever server the OS picks.
+
+**Stopping is a request.** The switch writes `state/stop.request`; the watcher
+notices between messages and exits having finished the one it was on.
+Terminating it mid-draft could leave a partly written reply in Outlook and a
+model call whose spend went unrecorded. The wait between polls is sliced so a
+stop lands in about a second rather than after the full interval. A stop that
+goes unanswered for ninety seconds — a watcher left running from before an
+update, or one wedged in a COM call — offers a forced shutdown as a last resort.
+
+**Whether the agent is running is asked of the lock, not of a recorded PID.**
+Failing to take `state/watch.lock` proves a watcher is alive, stays correct for
+one started from a terminal, and avoids `os.kill(pid, 0)`, which terminates the
+process on Windows rather than testing it.
+
+**Nothing touches Outlook from inside a request.** COM is bound to the thread
+that initialised it, so reading Sent Items runs as a separate short-lived
+process and leaves its answer in `state/outcomes.json`:
+
+```bash
+python -m rotem_agent.cli outcomes --days 30
+```
+
+That is what turns "12 drafts, $0.30" into "12 drafted, 9 sent, 3 discarded",
+which is the only measure of whether the drafts are worth having. A reply the
+lawyer rewrote entirely still counts as sent: the distinction being drawn is
+between a draft that gave her somewhere to start and one she threw away. Until
+the scan has run the answer is unknown rather than "not sent", because
+reporting every draft as discarded would invite exactly the wrong conclusion.
+
+Set `usd_to_ils` in `config/pricing.yaml` to show shekels alongside dollars.
+
 ## Logs and cost
 
 Everything printed is mirrored to `logs/agent.log`, five rotating files of two

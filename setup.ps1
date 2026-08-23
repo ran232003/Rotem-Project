@@ -1,4 +1,8 @@
-# One-shot setup for a fresh Windows machine.
+﻿# One-shot setup for a fresh Windows machine.
+#
+# Save this file as UTF-8 *with* a byte-order mark. It contains Hebrew, and
+# Windows PowerShell 5.1 reads a BOM-less script as ANSI, which turns those
+# characters into mojibake and the script into a parse error.
 #
 # Safe to run more than once: it skips anything already done and never
 # overwrites a config file that has been filled in.
@@ -81,7 +85,45 @@ foreach ($pair in @(
     }
 }
 
-Say "`n5. Checking everything"
+Say "`n5. Putting an icon on the desktop"
+
+$icon = Join-Path $PSScriptRoot "assets\agent.ico"
+if (-not (Test-Path $icon)) {
+    & $venvPython (Join-Path $PSScriptRoot "tools\make_icon.py") | Out-Null
+}
+
+$desktop = [Environment]::GetFolderPath("Desktop")
+# WScript.Shell saves through an ANSI interface, so a Hebrew path arrives as
+# question marks and the save fails outright. Write it under an ASCII name and
+# rename with the .NET file API, which is Unicode all the way down.
+$ascii = Join-Path $desktop "rotem-agent.lnk"
+$hebrew = Join-Path $desktop "סוכן הטיוטות.lnk"
+
+try {
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut($ascii)
+    $shortcut.TargetPath = Join-Path $PSScriptRoot "dashboard.bat"
+    $shortcut.WorkingDirectory = $PSScriptRoot
+    $shortcut.Description = "Opens the draft agent dashboard"
+    if (Test-Path $icon) { $shortcut.IconLocation = $icon }
+    # Minimised: the console window is only the host process, and having it
+    # open in her face invites closing it and wondering what broke.
+    $shortcut.WindowStyle = 7
+    $shortcut.Save()
+
+    try {
+        if ([System.IO.File]::Exists($hebrew)) { [System.IO.File]::Delete($hebrew) }
+        [System.IO.File]::Move($ascii, $hebrew)
+        Good "Created the desktop icon."
+    } catch {
+        Good "Created the desktop icon (named rotem-agent)."
+    }
+} catch {
+    Warn "Could not create the desktop icon: $($_.Exception.Message)"
+    Warn "You can still start it by double-clicking dashboard.bat in this folder."
+}
+
+Say "`n6. Checking everything"
 
 & $venvPython -m rotem_agent.cli doctor
 $doctor = $LASTEXITCODE
@@ -89,7 +131,8 @@ $doctor = $LASTEXITCODE
 Write-Host ""
 if ($doctor -eq 0) {
     Say "Setup is complete."
-    Write-Host "Try a draft against the sample email:"
+    Write-Host "Double-click 'סוכן הטיוטות' on the desktop to open the dashboard."
+    Write-Host "Or try a draft against the sample email first:"
     Write-Host "  .venv\Scripts\python.exe -m rotem_agent.cli draft samples\anna_reentry_visa.eml"
 } else {
     Say "Setup is nearly done."

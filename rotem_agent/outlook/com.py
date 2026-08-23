@@ -185,6 +185,44 @@ class OutlookMailbox:
                 return hits
         return []
 
+    # ------------------------------------------------------------------ outcome
+
+    def sent_conversations(self, since: Any) -> dict[str, Any]:
+        """When we last sent on each conversation, for mail sent since `since`.
+
+        This is how a draft is told from a draft that was used. The ledger knows
+        what the agent wrote; only Sent Items knows whether the lawyer sent
+        anything on that thread afterwards, and that ratio is the one honest
+        measure of whether the drafts are worth having.
+
+        A reply the lawyer rewrote from scratch still counts as sent. The
+        distinction being drawn is between a draft that helped and one that was
+        discarded, and a heavily edited draft is a starting point that worked.
+        """
+        folder = _safe(lambda: self.folder(OL_FOLDER_SENT), None)
+        items = _safe(lambda: folder.Items, None) if folder is not None else None
+        if items is None:
+            return {}
+
+        # Newest first, so the walk stops at the window's edge instead of
+        # reading a Sent Items folder holding years of mail.
+        _safe(lambda: items.Sort("[SentOn]", True), None)
+
+        latest: dict[str, Any] = {}
+        for item in items:
+            when = _safe(lambda: item.SentOn, None)
+            if when is None:
+                continue
+            try:
+                if when < since:
+                    break
+            except TypeError:  # naive against aware, seen across Outlook versions
+                continue
+            conversation = _safe(lambda: str(item.ConversationID), None)
+            if conversation and conversation not in latest:
+                latest[conversation] = when
+        return latest
+
     # -------------------------------------------------------------------- parse
 
     def to_parsed_email(self, item: Any) -> ParsedEmail:

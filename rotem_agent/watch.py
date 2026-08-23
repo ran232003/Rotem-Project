@@ -5,9 +5,14 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Iterable, Sequence
 
+from rotem_agent.control import stop_requested
 from rotem_agent.logs import logger
 from rotem_agent.outlook.com import FoundMessage, OutlookMailbox
 from rotem_agent.state import DraftLedger, LedgerEntry, message_key, utc_now
+
+# How long a stop can take to be noticed while the watcher is idle between
+# polls. Short enough that the button feels immediate, long enough not to spin.
+_STOP_POLL_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -151,11 +156,20 @@ def watch(
     max_cycles: int | None = None,
     retrieve_fn: Callable[[object, FoundMessage], tuple[list, list]] | None = None,
     emit_fn: Callable[[object, FoundMessage], None] | None = None,
+    should_stop: Callable[[], bool] = stop_requested,
 ) -> int:
-    """Poll until interrupted. Returns the number of drafts created."""
+    """Poll until interrupted or asked to stop. Returns the drafts created.
+
+    The stop request is honoured between messages rather than during one.
+    Interrupting a draft would leave a partly written reply in Outlook and a
+    model call whose spend was never recorded.
+    """
     total = 0
     cycle = 0
     while max_cycles is None or cycle < max_cycles:
+        if should_stop():
+            log("  stop requested; finishing.")
+            break
         cycle += 1
         try:
             total += len(
@@ -171,8 +185,25 @@ def watch(
             box.connect()
         if max_cycles is not None and cycle >= max_cycles:
             break
-        sleep(options.interval_seconds)
+        if not _wait(sleep, options.interval_seconds, should_stop):
+            log("  stop requested; finishing.")
+            break
     return total
+
+
+def _wait(sleep: Callable[[float], None], seconds: float, should_stop: Callable[[], bool]) -> bool:
+    """Sleep in slices so a stop is acted on promptly, not a minute later.
+
+    Returns False when a stop was requested during the wait.
+    """
+    remaining = float(seconds)
+    while remaining > 0:
+        if should_stop():
+            return False
+        slice_seconds = min(_STOP_POLL_SECONDS, remaining)
+        sleep(slice_seconds)
+        remaining -= slice_seconds
+    return not should_stop()
 
 
 def _entry_id(draft: object) -> str | None:
