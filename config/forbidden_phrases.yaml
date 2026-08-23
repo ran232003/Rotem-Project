@@ -1,0 +1,65 @@
+# Wording the firm does not use in client-facing text.
+#
+# From Rotem's "Hebrew conventions" in the intake skill. These are here rather
+# than only in the prompt because they are decidable by looking at the text: a
+# prompt asking the model to avoid a phrase is a request, and this is a rule.
+#
+# severity:
+#   problem  - the draft is held back and reported. Use for a categorical
+#              assurance, which is the wording that can cost a client their
+#              status rather than just an edit.
+#   warning  - reported next to the draft, which is still produced.
+#
+# unless_negated: the phrase is only wrong as an assurance. "לא ניתן לקבוע
+#   בוודאות" is the hedging the firm actually wants, so a negator shortly before
+#   the phrase clears it. Leave this off for phrases that are already negative in
+#   form, such as אין מה לדאוג, or the check would never fire.
+#
+# Add to this list freely. Nothing here is matched against the internal note,
+# only against what the client would read.
+
+phrases:
+  - phrase: אין מה לדאוג
+    severity: problem
+    why: Tells the client not to worry about an outcome the firm does not control.
+
+  - phrase: מובטח
+    severity: problem
+    why: Promises a result. The Authority's discretion is never the firm's to guarantee.
+
+  - phrase: בוודאות
+    severity: problem
+    unless_negated: true
+    why: States certainty about an administrative outcome.
+
+  - phrase: אין בעיה
+    severity: problem
+    why: Dismisses a difficulty the client raised, and implies an assurance.
+
+  - phrase: כפי שכבר הסברנו
+    severity: warning
+    why: Reads as a reproach to a client who is asking again because they are worried.
+
+  - phrase: חוות דעת משפטית
+    severity: warning
+    unless_negated: true
+    why: >-
+      A preliminary view must not be called a legal opinion. Legitimate where the
+      draft says one is not being given, which the negation check allows for.
+
+# Words that clear a phrase when they appear shortly before it.
+negators:
+  - לא
+  - אין
+  - איני
+  - איננו
+  - בלתי
+  - ללא
+  - אי אפשר
+  - לא ניתן
+  - טרם
+
+# How many characters before the phrase a negator may sit. Wide enough for
+# "לא ניתן לקבוע בוודאות", tight enough that a negator in a previous clause
+# does not excuse an assurance in this one.
+negation_window: 40
