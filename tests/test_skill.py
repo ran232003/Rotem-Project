@@ -29,6 +29,31 @@ def test_prompt_section_includes_reference_content(skill):
     assert "status_spousal" in section
 
 
+def test_a_scoped_reference_loads_for_a_matter_it_governs(skill):
+    section = skill.as_prompt_section("status_spousal")
+    assert "Personal-status continuity" in section
+
+
+def test_a_scoped_reference_stays_out_of_an_unrelated_matter(skill):
+    """A certificate procedure in a scheduling prompt dilutes the rules that apply."""
+    section = skill.as_prompt_section("admin")
+    assert "Personal-status continuity" not in section
+    # The universal references must still be there.
+    assert "Holding reply rule" in section
+
+
+def test_an_unknown_category_keeps_scoped_references(skill):
+    """A first enquiry has no matter folder, and is exactly when this must not vanish."""
+    assert "Personal-status continuity" in skill.as_prompt_section(None)
+
+
+def test_reference_scope_is_read_from_its_frontmatter(skill):
+    assert skill.references["public documents"].applies_to >= {"status_spousal", "citizenship"}
+    assert skill.references["voice and drafting"].applies_to == frozenset()
+    # Frontmatter must not survive into the prompt as literal YAML.
+    assert "applies_to" not in skill.as_prompt_section("status_spousal")
+
+
 def test_missing_reference_is_an_error(tmp_path):
     root = tmp_path / "broken"
     (root / "references").mkdir(parents=True)

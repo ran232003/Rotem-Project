@@ -2,6 +2,17 @@
 
 Run this before drafting. If any trigger fires, the draft is not a normal reply.
 
+> **Awaiting the firm's decision.** Rotem's own version of this procedure sets
+> the deadline trigger at **14 days**, not 72 hours, and covers hearings,
+> interviews, appointments, expiring status and travel. Hers also separates the
+> two things this section merges: her trigger means "never auto-send", a
+> statement about who approves, whereas the heading below also stops the agent
+> writing a substantive draft at all. Widening 72 hours to 14 days without
+> splitting those apart would turn most immigration replies into content-free
+> acknowledgements, so the number is left as it is until she decides. Until then
+> the shorter window is in force and the agent is more permissive than the
+> firm's written policy.
+
 ## Escalate to the principal lawyer, do not draft substantively
 
 - Detention, an existing removal order, or refusal of entry in progress.
