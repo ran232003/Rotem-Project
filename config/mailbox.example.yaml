@@ -7,3 +7,9 @@
 mailbox: you@example.com
 allowed_senders:
   - client@example.com
+
+# The day the agent started work. Mail received before this is left alone, so
+# turning it on does not produce a reply to every old thread in the mailbox.
+# Write it as 2026-08-20 or 20.08.2026; the day is read in local time.
+# Remove the line to place no floor on how far back it may look.
+start_date: 2026-08-20

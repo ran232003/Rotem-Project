@@ -165,6 +165,41 @@ def check_model_reachable() -> Check:
     return Check("Gemini reachable", OK, f"{model} answered")
 
 
+def _start_date_check(value: object, path: Path) -> Check:
+    """A date the agent will not look before, if one is set.
+
+    Reported even when absent, because the difference between "configured to
+    ignore old mail" and "ignoring old mail for reasons nobody understands" is
+    the whole value of saying so.
+    """
+    from datetime import datetime, timezone
+
+    from rotem_agent.outlook.com import parse_start_date
+
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return Check(
+            "Start date",
+            WARN,
+            "not set, so old mail is limited only by --backlog-days",
+            "Set start_date in config/mailbox.yaml to the day the agent starts "
+            "work, or old threads may get replies when it is first turned on.",
+        )
+
+    try:
+        floor = parse_start_date(value, path)
+    except Exception as exc:
+        return Check("Start date", FAIL, str(exc), "Write it as 2026-08-20 or 20.08.2026.")
+
+    if floor > datetime.now(timezone.utc):
+        return Check(
+            "Start date",
+            FAIL,
+            f"{floor.astimezone():%d.%m.%Y} is in the future, so nothing will be drafted",
+            "Set it to today or earlier.",
+        )
+    return Check("Start date", OK, f"mail from {floor.astimezone():%d.%m.%Y} onwards")
+
+
 def check_configs(config_dir: Path | None = None) -> list[Check]:
     base = config_dir or CONFIG_DIR
     checks: list[Check] = []
@@ -232,6 +267,7 @@ def check_configs(config_dir: Path | None = None) -> list[Check]:
                 checks.append(
                     Check("Mailbox config", OK, f"{address}, {len(senders)} allowed sender(s)")
                 )
+                checks.append(_start_date_check(data.get("start_date"), mailbox))
         except Exception as exc:
             checks.append(Check("Mailbox config", FAIL, str(exc), "Fix the YAML syntax."))
 

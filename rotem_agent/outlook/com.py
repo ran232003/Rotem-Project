@@ -5,6 +5,7 @@ import html
 import mimetypes
 import re
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from email.message import EmailMessage
 from email.utils import format_datetime, formataddr
 from pathlib import Path
@@ -55,11 +56,52 @@ class MailboxConfig:
 
     mailbox: str
     allowed_senders: list[str]
+    # Mail received before this is not the agent's business, however far back the
+    # rolling backlog window would otherwise reach. Held as an aware UTC instant
+    # so it can be compared with what Outlook reports.
+    start_date: datetime | None = None
 
     def allows(self, address: str | None) -> bool:
         if not address:
             return False
         return address.strip().lower() in {a.strip().lower() for a in self.allowed_senders}
+
+
+_DATE_FORMATS = ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y", "%Y/%m/%d")
+
+
+def parse_start_date(value: Any, target: Path | str = "config/mailbox.yaml") -> datetime | None:
+    """Midnight on that day, local time, as UTC.
+
+    Local rather than UTC midnight because "from the 20th" means the 20th where
+    she is. Israel is three hours ahead, so a UTC reading would silently drop
+    anything that arrived in the first three hours of the day.
+
+    Accepts what a person is likely to type: YAML's own date, or a string as
+    either 2026-08-20 or 20.08.2026.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+
+    if isinstance(value, datetime):
+        day = value.replace(tzinfo=None)
+    elif isinstance(value, date):
+        day = datetime(value.year, value.month, value.day)
+    else:
+        text = str(value).strip()
+        for pattern in _DATE_FORMATS:
+            try:
+                day = datetime.strptime(text, pattern)
+                break
+            except ValueError:
+                continue
+        else:
+            raise ConfigError(
+                f"start_date in {target} is not a date I recognise: {value!r}. "
+                "Write it as 2026-08-20 or 20.08.2026."
+            )
+
+    return day.astimezone(timezone.utc)
 
 
 def load_mailbox_config(path: Path | None = None) -> MailboxConfig:
@@ -73,7 +115,11 @@ def load_mailbox_config(path: Path | None = None) -> MailboxConfig:
     senders = [str(s) for s in data.get("allowed_senders", []) if str(s).strip()]
     if not senders:
         raise ConfigError(f"{target} has no allowed_senders; refusing to scan the whole mailbox.")
-    return MailboxConfig(mailbox=str(data.get("mailbox", "")).strip(), allowed_senders=senders)
+    return MailboxConfig(
+        mailbox=str(data.get("mailbox", "")).strip(),
+        allowed_senders=senders,
+        start_date=parse_start_date(data.get("start_date"), target),
+    )
 
 
 @dataclass

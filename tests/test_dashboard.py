@@ -20,6 +20,20 @@ from rotem_agent.dashboard import PAGE, _already_serving, _Handler, serve
 from rotem_agent.senders import SenderError
 
 
+class _Accounts:
+    """Stands in for the out-of-process Outlook lookup."""
+
+    def __init__(self, known):
+        self.known_addresses = list(known)
+        self.primed = 0
+
+    def prime(self):
+        self.primed += 1
+
+    def cached(self):
+        return list(self.known_addresses)
+
+
 class _Stub:
     def __init__(self):
         self.started = 0
@@ -27,13 +41,23 @@ class _Stub:
         self.forced = 0
         self.refreshed = []
         self.addresses = ["a@x.com"]
+        self.box = "her@firm.co.il"
+        self.accounts = _Accounts(["her@firm.co.il", "other@firm.co.il"])
 
     def _payload(self):
         return {
             "watcher": {"running": bool(self.started > self.stopped)},
             "recent": [],
             "senders": list(self.addresses),
+            "mailbox": self.box,
+            "accounts": self.accounts.cached(),
         }
+
+    def set_mailbox(self, address):
+        if address not in self.accounts.known_addresses:
+            raise SenderError(f"אאוטלוק אינו מחובר ל־{address}.")
+        self.box = address
+        return self._payload()
 
     def add_sender(self, address):
         if address in self.addresses:
@@ -243,6 +267,50 @@ def test_another_site_cannot_widen_the_allowlist(server):
         )
     assert caught.value.code == 403
     assert stub.addresses == ["a@x.com"]
+
+
+def test_the_mailbox_and_the_real_accounts_are_both_in_the_status(server):
+    """Both, so the page can show a disagreement rather than only the claim."""
+    base, _ = server
+    payload = json.loads(_get(base + "/api/status")[1])
+    assert payload["mailbox"] == "her@firm.co.il"
+    assert payload["accounts"] == ["her@firm.co.il", "other@firm.co.il"]
+
+
+def test_reading_the_status_asks_outlook_in_the_background(server):
+    base, stub = server
+    _get(base + "/api/status")
+    assert stub.accounts.primed == 1
+
+
+def test_the_mailbox_can_be_changed_to_another_signed_in_account(server):
+    base, stub = server
+    status, body = _post(base + "/api/mailbox", payload={"address": "other@firm.co.il"})
+    assert status == 200
+    assert json.loads(body)["mailbox"] == "other@firm.co.il"
+    assert stub.box == "other@firm.co.il"
+
+
+def test_a_mailbox_outlook_does_not_have_is_refused_with_a_reason(server):
+    base, stub = server
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        _post(base + "/api/mailbox", payload={"address": "someone@else.com"})
+
+    assert caught.value.code == 400
+    assert "אאוטלוק" in json.loads(caught.value.read().decode("utf-8"))["error"]
+    assert stub.box == "her@firm.co.il"
+
+
+def test_another_site_cannot_change_the_mailbox(server):
+    base, stub = server
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        _post(
+            base + "/api/mailbox",
+            origin="https://example.com",
+            payload={"address": "other@firm.co.il"},
+        )
+    assert caught.value.code == 403
+    assert stub.box == "her@firm.co.il"
 
 
 def test_a_live_dashboard_is_recognised(server):

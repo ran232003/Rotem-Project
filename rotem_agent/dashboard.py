@@ -22,10 +22,12 @@ import subprocess
 import sys
 import threading
 import webbrowser
+from collections.abc import Callable
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from rotem_agent import accounts as accounts_module
 from rotem_agent import control, outcomes, senders, stats
 from rotem_agent.config import PROJECT_ROOT
 from rotem_agent.pricing import load_prices
@@ -45,6 +47,7 @@ class Dashboard:
     def __init__(self, *, interval_seconds: int = 60, python: str | None = None) -> None:
         self.interval_seconds = interval_seconds
         self.python = python or sys.executable
+        self.accounts = accounts_module.Accounts(python=self.python)
         self._refreshing = False
         self._last_refresh = 0.0
         self._lock = threading.Lock()
@@ -69,7 +72,40 @@ class Dashboard:
         snapshot["refreshing"] = self._refreshing
         snapshot["at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         snapshot["senders"] = self.senders()
+        snapshot["start_date"] = self.start_date()
+        snapshot["mailbox"] = self.mailbox()
+        snapshot["accounts"] = self.accounts.cached()
         return snapshot
+
+    def mailbox(self) -> str:
+        """The address config/mailbox.yaml declares, or empty if unreadable."""
+        try:
+            return senders.read_mailbox()
+        except senders.SenderError:
+            return ""
+
+    def set_mailbox(self, address: str) -> dict:
+        """Change the declared mailbox, checked against Outlook first.
+
+        Blocks for as long as asking Outlook takes. That is the point: the field
+        is a claim `doctor` verifies, and a page that let her save an address
+        Outlook has never heard of would turn a wrong setting into a startup
+        warning she sees days later, with nothing linking it to this click.
+        """
+        senders.set_mailbox(address, self.accounts.known())
+        return self.status()
+
+    def start_date(self) -> str | None:
+        """The day before which mail is left alone, as a local date.
+
+        Shown because otherwise its effect — old mail never being drafted — is
+        indistinguishable from the agent being broken.
+        """
+        try:
+            floor = senders.start_date()
+        except senders.SenderError:
+            return None
+        return floor.astimezone().strftime("%d.%m.%Y") if floor else None
 
     def senders(self) -> list[str]:
         """The allowlist, or an empty list if the file cannot be read.
@@ -153,6 +189,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_page()
         elif self.path.startswith("/api/status"):
             self.dashboard.refresh_outcomes()
+            self.dashboard.accounts.prime()
             self._send_json(self.dashboard.status())
         else:
             self.send_error(404)
@@ -170,17 +207,21 @@ class _Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/refresh":
             self.dashboard.refresh_outcomes(force=True)
             self._send_json(self.dashboard.status())
-        elif self.path in ("/api/senders/add", "/api/senders/remove"):
-            self._edit_senders(add=self.path.endswith("add"))
+        elif self.path == "/api/senders/add":
+            self._change(self.dashboard.add_sender)
+        elif self.path == "/api/senders/remove":
+            self._change(self.dashboard.remove_sender)
+        elif self.path == "/api/mailbox":
+            self._change(self.dashboard.set_mailbox)
         else:
             self.send_error(404)
 
-    def _edit_senders(self, *, add: bool) -> None:
-        """Editing the allowlist widens or narrows what the agent may read.
+    def _change(self, action: Callable[[str], dict]) -> None:
+        """Every config edit takes one address and may be refused with a reason.
 
-        The refusals are reported as 400 with the reason, because every one of
-        them is something the person at the keyboard can correct: a typo, an
-        address already listed, or the last one being removed.
+        Refusals come back as 400 carrying the text, because each is something
+        the person at the keyboard can correct: a typo, an address already
+        listed, the last one being removed, or a mailbox Outlook does not have.
         """
         try:
             address = str(self._body().get("address", ""))
@@ -188,7 +229,6 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_error(400, "malformed request")
             return
         try:
-            action = self.dashboard.add_sender if add else self.dashboard.remove_sender
             self._send_json(action(address))
         except senders.SenderError as exc:
             self._send_json({"error": str(exc)}, status=400)

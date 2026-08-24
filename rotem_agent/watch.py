@@ -25,6 +25,7 @@ class WatchOptions:
     save: bool = False
     interval_seconds: int = 60
     backlog_days: int = 7
+    start_date: datetime | None = None
     max_per_cycle: int = 5
     source_policy: str = "advisory"
     force: bool = False
@@ -39,15 +40,24 @@ def as_datetime(value: object) -> datetime | None:
     return None
 
 
-def backlog_cutoff(days: int, now: datetime | None = None) -> datetime | None:
-    """Ignore anything older than `days`, or everything old when days is 0.
+def backlog_cutoff(
+    days: int, now: datetime | None = None, floor: datetime | None = None
+) -> datetime | None:
+    """The oldest message worth drafting: the later of two limits.
 
-    Without this, first run against a mailbox with years of history would draft
-    replies to every message it finds.
+    `days` is a rolling window, without which a first run against a mailbox
+    holding years of history would draft a reply to everything in it. `floor` is
+    a fixed date from configuration — when the agent started work, before which
+    old threads are not its business no matter how wide the window is.
+
+    Whichever is later wins, so neither limit can be widened by the other.
     """
-    if days < 0:
-        return None
-    return (now or datetime.now(timezone.utc)) - timedelta(days=days)
+    rolling = None if days < 0 else (now or datetime.now(timezone.utc)) - timedelta(days=days)
+    if rolling is None:
+        return floor
+    if floor is None:
+        return rolling
+    return max(rolling, floor)
 
 
 def select_pending(
@@ -104,7 +114,7 @@ def run_cycle(
     pending = select_pending(
         matches,
         ledger,
-        cutoff=backlog_cutoff(options.backlog_days),
+        cutoff=backlog_cutoff(options.backlog_days, floor=options.start_date),
         max_items=options.max_per_cycle,
         force=options.force,
     )

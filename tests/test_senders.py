@@ -177,6 +177,123 @@ def test_unix_line_endings_stay_unix(tmp_path):
     assert b"\r\n" not in path.read_bytes()
 
 
+# ------------------------------------------------------------------- the mailbox
+#
+# One value rather than a list, and a claim about the machine rather than a
+# setting: the reader always opens whatever mailbox Outlook opens by default, so
+# this line is only ever checked against reality.
+
+
+def test_reading_the_declared_mailbox(tmp_path):
+    assert senders.read_mailbox(_file(tmp_path, BASIC)) == "me@corp.com"
+
+
+def test_a_missing_mailbox_line_reads_as_empty(tmp_path):
+    assert senders.read_mailbox(_file(tmp_path, "allowed_senders:\n  - a@x.com\n")) == ""
+
+
+def test_a_trailing_comment_is_not_part_of_the_address(tmp_path):
+    path = _file(tmp_path, "mailbox: me@corp.com  # her work account\n")
+    assert senders.read_mailbox(path) == "me@corp.com"
+
+
+def test_a_note_on_the_mailbox_line_survives_the_change(tmp_path):
+    path = _file(tmp_path, "mailbox: me@corp.com  # her work account\n")
+    senders.set_mailbox("her@firm.co.il", None, path)
+
+    after = path.read_text(encoding="utf-8")
+    assert "# her work account" in after
+    assert senders.read_mailbox(path) == "her@firm.co.il"
+
+
+def test_changing_the_mailbox_replaces_it_rather_than_adding(tmp_path):
+    path = _file(tmp_path, BASIC)
+    senders.set_mailbox("her@firm.co.il", ["her@firm.co.il"], path)
+
+    loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert loaded["mailbox"] == "her@firm.co.il"
+    assert loaded["allowed_senders"] == ["a@x.com"]
+    assert path.read_text(encoding="utf-8").count("mailbox:") == 1
+
+
+def test_an_account_outlook_does_not_have_is_refused(tmp_path):
+    """The field is a claim doctor verifies. Writing one already known to be
+    false would surface days later as a startup warning with nothing linking it
+    to the edit that caused it."""
+    path = _file(tmp_path, BASIC)
+    with pytest.raises(senders.SenderError, match="אינו מחובר"):
+        senders.set_mailbox("someone@else.com", ["her@firm.co.il"], path)
+    assert senders.read_mailbox(path) == "me@corp.com"
+
+
+def test_the_refusal_names_the_addresses_that_would_work(tmp_path):
+    path = _file(tmp_path, BASIC)
+    with pytest.raises(senders.SenderError, match="her@firm.co.il"):
+        senders.set_mailbox("someone@else.com", ["her@firm.co.il"], path)
+
+
+def test_case_does_not_make_a_signed_in_account_unknown(tmp_path):
+    path = _file(tmp_path, BASIC)
+    assert senders.set_mailbox("HER@Firm.co.il", ["her@firm.co.il"], path) == "HER@Firm.co.il"
+
+
+def test_not_being_able_to_ask_outlook_refuses_rather_than_writes(tmp_path):
+    """An empty account list means the lookup failed, not that nothing is valid.
+    Treating the two the same would let a wrong value through the one moment the
+    check could not run."""
+    path = _file(tmp_path, BASIC)
+    with pytest.raises(senders.SenderError, match="אאוטלוק"):
+        senders.set_mailbox("her@firm.co.il", [], path)
+    assert senders.read_mailbox(path) == "me@corp.com"
+
+
+def test_the_check_can_be_skipped_deliberately(tmp_path):
+    path = _file(tmp_path, BASIC)
+    assert senders.set_mailbox("her@firm.co.il", None, path) == "her@firm.co.il"
+
+
+def test_a_bad_mailbox_address_is_refused(tmp_path):
+    path = _file(tmp_path, BASIC)
+    with pytest.raises(senders.SenderError):
+        senders.set_mailbox("not an address", None, path)
+    assert senders.read_mailbox(path) == "me@corp.com"
+
+
+def test_a_file_with_no_mailbox_line_says_so_instead_of_appending(tmp_path):
+    path = _file(tmp_path, "allowed_senders:\n  - a@x.com\n")
+    with pytest.raises(senders.SenderError, match="mailbox"):
+        senders.set_mailbox("her@firm.co.il", None, path)
+
+
+def test_comments_survive_a_mailbox_change(tmp_path):
+    path = _file(tmp_path, COMMENTED)
+    senders.set_mailbox("her@firm.co.il", None, path)
+    after = path.read_text(encoding="utf-8")
+
+    assert "# the boundary, do not widen without asking" in after
+    assert "# trailing note" in after
+    assert senders.read(path) == ["a@x.com"]
+
+
+def test_a_mailbox_change_keeps_windows_line_endings(tmp_path):
+    path = tmp_path / "mailbox.yaml"
+    path.write_bytes(b"mailbox: me@corp.com\r\nallowed_senders:\r\n  - a@x.com\r\n")
+
+    senders.set_mailbox("her@firm.co.il", None, path)
+
+    raw = path.read_bytes()
+    assert raw.count(b"\n") == raw.count(b"\r\n")
+
+
+def test_the_changed_mailbox_is_what_load_mailbox_config_reads(tmp_path):
+    from rotem_agent.outlook.com import load_mailbox_config
+
+    path = _file(tmp_path, COMMENTED)
+    senders.set_mailbox("her@firm.co.il", None, path)
+
+    assert load_mailbox_config(path).mailbox == "her@firm.co.il"
+
+
 def test_a_failed_write_leaves_no_temporary_file_behind(tmp_path, monkeypatch):
     path = _file(tmp_path, BASIC)
     monkeypatch.setattr(senders.os, "replace", lambda *a: (_ for _ in ()).throw(OSError("nope")))

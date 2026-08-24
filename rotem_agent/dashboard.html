@@ -114,9 +114,14 @@
 
       .cards {
         display: grid;
-        grid-template-columns: repeat(3, 1fr);
+        grid-template-columns: repeat(4, 1fr);
         gap: 14px;
         margin: 14px 0;
+      }
+      /* The running total is the one figure nobody wants to have to add up. */
+      .card.total {
+        border-color: #cfd8e3;
+        background: #f8fafc;
       }
       .card {
         background: var(--card);
@@ -245,6 +250,20 @@
         color: #b91c1c;
         border-color: #fca5a5;
       }
+      /* Changing the mailbox is not a removal, so it does not go red. */
+      .mailbox button:hover:not(:disabled) {
+        color: var(--ink);
+        border-color: var(--on);
+      }
+      .warn {
+        color: #92400e;
+        background: #fffbeb;
+        border: 1px solid #fde68a;
+        border-radius: 9px;
+        padding: 10px 13px;
+        font-size: 13.5px;
+        margin-bottom: 12px;
+      }
       .addrow {
         display: flex;
         gap: 10px;
@@ -267,6 +286,28 @@
         color: #b91c1c;
         font-size: 13.5px;
         margin-top: 12px;
+      }
+      .pager {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-top: 12px;
+      }
+      .pager button {
+        padding: 6px 14px;
+        font-size: 13.5px;
+        background: #fff;
+        color: var(--ink);
+        border-color: #cbd0d6;
+      }
+      .pager .of {
+        color: var(--muted);
+        font-size: 13px;
+      }
+      @media (max-width: 980px) {
+        .cards {
+          grid-template-columns: repeat(2, 1fr);
+        }
       }
       @media (max-width: 720px) {
         .cards {
@@ -306,10 +347,18 @@
           <div id="d-month" class="big">–</div>
           <div id="u-month" class="under"></div>
         </div>
+        <div class="card total">
+          <h2>עלות מאז ההתחלה</h2>
+          <div id="c-all" class="big">–</div>
+          <div id="u-all" class="under"></div>
+        </div>
       </div>
 
       <div class="panel">
-        <h2 style="margin: 0 0 10px; font-size: 15px">טיוטות אחרונות</h2>
+        <h2 id="recentTitle" style="margin: 0 0 6px; font-size: 15px">
+          טיוטות אחרונות
+        </h2>
+        <p class="hint" id="recentNote"></p>
         <table>
           <thead>
             <tr>
@@ -322,7 +371,12 @@
           </thead>
           <tbody id="rows"></tbody>
         </table>
-        <div id="none" class="empty" hidden>עוד לא נוצרו טיוטות.</div>
+        <div id="none" class="empty" hidden></div>
+        <div id="pager" class="pager" hidden>
+          <button id="newer" class="secondary">חדשות יותר</button>
+          <button id="older" class="secondary">ישנות יותר</button>
+          <span id="pageOf" class="of"></span>
+        </div>
         <div class="foot">
           <button
             id="refresh"
@@ -336,10 +390,44 @@
       </div>
 
       <div class="panel" style="margin-top: 14px">
+        <h2 style="margin: 0 0 6px; font-size: 15px">תיבת הדואר</h2>
+        <p class="hint">
+          הסוכן עובד על התיבה שאאוטלוק פתוח בה במחשב הזה. השורה הזאת מצהירה
+          עליה, ומשמשת לבדיקה שההגדרות והמחשב מסכימים — היא אינה מחליפה תיבה.
+          לכן אפשר לשנות אותה רק לכתובת שאאוטלוק כאן מחובר אליה.
+          <span id="accountsNote"></span>
+        </p>
+        <div id="mailboxWarn" class="warn" hidden>
+          הכתובת המוגדרת אינה אחת מהכתובות שאאוטלוק מחובר אליהן, כך שהסוכן קורא
+          תיבה אחרת מזו שרשומה כאן.
+        </div>
+        <ul id="mailboxView" class="senders mailbox">
+          <li>
+            <span id="mailboxAddr" class="addr ltr">—</span>
+            <button id="editMailbox">שינוי</button>
+          </li>
+        </ul>
+        <div id="mailboxEdit" class="addrow" hidden>
+          <input
+            id="mailboxInput"
+            type="email"
+            dir="ltr"
+            placeholder="name@example.com"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <button id="saveMailbox" class="secondary">שמירה</button>
+          <button id="cancelMailbox" class="secondary">ביטול</button>
+        </div>
+        <div id="mailboxError" class="err" hidden></div>
+      </div>
+
+      <div class="panel" style="margin-top: 14px">
         <h2 style="margin: 0 0 6px; font-size: 15px">כתובות שהסוכן עונה להן</h2>
         <p class="hint">
           הסוכן קורא רק מיילים מהכתובות שברשימה הזאת, ואינו נוגע בשאר תיבת
           הדואר. שינוי נכנס לתוקף בתוך דקה, בלי לכבות ולהפעיל מחדש.
+          <span id="startDate"></span>
         </p>
         <ul id="senders" class="senders"></ul>
         <div class="addrow">
@@ -356,13 +444,18 @@
         <div id="senderError" class="err" hidden></div>
       </div>
 
-      <div class="foot"><span id="note"></span></div>
     </div>
 
     <script>
       const $ = (id) => document.getElementById(id);
       let busy = false;
       let running = false;
+
+      const PER_PAGE = 10;
+      let page = 0;
+      // The last snapshot, so turning a page redraws from what is already here
+      // instead of waiting on a request.
+      let last = null;
 
       const nf = new Intl.NumberFormat("he-IL");
 
@@ -410,7 +503,24 @@
         $("u-" + prefix).textContent = bits.join(" · ");
       }
 
+      // The running total leads with the money rather than the count, because it
+      // is the one figure nobody can work out by looking at the other cards.
+      function totalCard(w) {
+        $("c-all").textContent = money(w.cost_usd, w.cost_ils);
+        const bits = [`${nf.format(w.answered)} טיוטות`];
+        if (w.sent !== null && w.sent !== undefined)
+          bits.push(`נשלחו ${nf.format(w.sent)}`);
+        const tokens = w.input_tokens + w.output_tokens;
+        if (tokens) bits.push(`${nf.format(tokens)} טוקנים`);
+        $("u-all").textContent = bits.join(" · ");
+      }
+
+      function daysPhrase(n) {
+        return n === 7 ? "שבעת הימים האחרונים" : `${n} הימים האחרונים`;
+      }
+
       function paint(s) {
+        last = s;
         running = s.watcher.running;
         const stopping = s.watcher.stopping;
 
@@ -443,10 +553,40 @@
         card("today", s.windows.today);
         card("week", s.windows.week);
         card("month", s.windows.month);
+        totalCard(s.windows.all);
+
+        paintRows(s);
+
+        $("sentNote").textContent = s.refreshing
+          ? "בודק תיקיית 'נשלחו'…"
+          : s.outcomes_known
+            ? "נתוני שליחה נכונים ל־" + when(s.outcomes_refreshed_at)
+            : "נתוני השליחה טרם נבדקו.";
+
+        paintSenders(s.senders || []);
+        paintMailbox(s);
+        // Without this, mail older than the cutoff simply never appears and the
+        // agent looks broken rather than configured.
+        $("startDate").textContent = s.start_date
+          ? `הסוכן מתייחס למיילים שהתקבלו מ־${s.start_date} ואילך.`
+          : "";
+      }
+
+      function paintRows(s) {
+        const rows = s.recent || [];
+        const days = s.recent_days || 7;
+        const pages = Math.max(1, Math.ceil(rows.length / PER_PAGE));
+        // Clamped rather than reset: a poll arriving while she reads page three
+        // should not throw her back to the top, but a page that no longer exists
+        // would show nothing at all.
+        page = Math.min(Math.max(page, 0), pages - 1);
+
+        $("recentTitle").textContent = `טיוטות מ${daysPhrase(days)}`;
+        $("none").textContent = `לא נוצרו טיוטות ב${daysPhrase(days)}.`;
 
         const body = $("rows");
         body.replaceChildren();
-        for (const r of s.recent) {
+        for (const r of rows.slice(page * PER_PAGE, (page + 1) * PER_PAGE)) {
           const tr = document.createElement("tr");
 
           const t = document.createElement("td");
@@ -487,17 +627,24 @@
 
           body.appendChild(tr);
         }
-        $("none").hidden = s.recent.length > 0;
 
-        $("sentNote").textContent = s.refreshing
-          ? "בודק תיקיית 'נשלחו'…"
-          : s.outcomes_known
-            ? "נתוני שליחה נכונים ל־" + when(s.outcomes_refreshed_at)
-            : "נתוני השליחה טרם נבדקו.";
+        $("none").hidden = rows.length > 0;
+        $("pager").hidden = rows.length <= PER_PAGE;
+        $("newer").disabled = page === 0;
+        $("older").disabled = page >= pages - 1;
+        $("pageOf").textContent = `עמוד ${page + 1} מתוך ${pages}`;
 
-        paintSenders(s.senders || []);
+        const total = nf.format(rows.length);
+        $("recentNote").textContent = s.recent_truncated
+          ? `מוצגות ${total} הטיוטות האחרונות. נוצרו יותר מכך בתקופה הזאת.`
+          : rows.length > PER_PAGE
+            ? `${total} טיוטות, ${PER_PAGE} בכל עמוד.`
+            : "";
+      }
 
-        $("note").textContent = s.currency_note ? "" : "";
+      function turnPage(by) {
+        page += by;
+        if (last) paintRows(last);
       }
 
       function paintSenders(list) {
@@ -526,6 +673,71 @@
           li.appendChild(remove);
 
           ul.appendChild(li);
+        }
+      }
+
+      function paintMailbox(s) {
+        const address = s.mailbox || "";
+        $("mailboxAddr").textContent = address || "לא הוגדרה";
+
+        // Empty until the background lookup returns; Outlook takes a few
+        // seconds to answer, and nothing here should wait for it.
+        const known = s.accounts || [];
+        $("accountsNote").textContent = known.length
+          ? `אאוטלוק כאן מחובר ל: ${known.join(", ")}.`
+          : "";
+        $("mailboxWarn").hidden =
+          !address ||
+          !known.length ||
+          known.some((a) => a.toLowerCase() === address.toLowerCase());
+      }
+
+      function editingMailbox(on) {
+        $("mailboxView").hidden = on;
+        $("mailboxEdit").hidden = !on;
+        mailboxError("");
+        if (!on) return;
+        const field = $("mailboxInput");
+        const current = $("mailboxAddr").textContent;
+        field.value = current.includes("@") ? current : "";
+        field.focus();
+        field.select();
+      }
+
+      function mailboxError(text) {
+        const box = $("mailboxError");
+        box.textContent = text;
+        box.hidden = !text;
+      }
+
+      async function saveMailbox() {
+        const address = $("mailboxInput").value.trim();
+        if (!address) return;
+        const button = $("saveMailbox");
+        const label = button.textContent;
+        button.disabled = true;
+        // The save asks Outlook which mailboxes it has before writing, which
+        // takes seconds. A button that just sits there looks like a lost click.
+        button.textContent = "בודק מול אאוטלוק…";
+        mailboxError("");
+        try {
+          const res = await fetch("/api/mailbox", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ address }),
+          });
+          const data = await res.json();
+          if (!res.ok) {
+            mailboxError(data.error || "הפעולה נכשלה.");
+            return;
+          }
+          paint(data);
+          editingMailbox(false);
+        } catch (e) {
+          mailboxError("אין חיבור לסוכן.");
+        } finally {
+          button.disabled = false;
+          button.textContent = label;
         }
       }
 
@@ -559,6 +771,9 @@
           button.disabled = false;
         }
       }
+
+      $("newer").addEventListener("click", () => turnPage(-1));
+      $("older").addEventListener("click", () => turnPage(1));
 
       async function load() {
         try {
@@ -613,6 +828,15 @@
         if (!address) return;
         if (await editSenders("/api/senders/add", address)) field.value = "";
       }
+
+      $("editMailbox").addEventListener("click", () => editingMailbox(true));
+      $("cancelMailbox").addEventListener("click", () => editingMailbox(false));
+      $("saveMailbox").addEventListener("click", saveMailbox);
+      $("mailboxInput").addEventListener("keydown", (e) => {
+        if (e.key === "Enter") saveMailbox();
+        if (e.key === "Escape") editingMailbox(false);
+      });
+      $("mailboxInput").addEventListener("input", () => mailboxError(""));
 
       $("addSender").addEventListener("click", addSender);
       $("newSender").addEventListener("keydown", (e) => {

@@ -7,7 +7,9 @@ never produced a reply. Adding them together would produce a per-email cost that
 is wrong in the direction that flatters the agent.
 
 Windows are local days. The logs are UTC, and a lawyer looking at 'today' at
-nine in the morning means her today.
+nine in the morning means her today. The all-time window has no start at all
+rather than a sentinel date, so nothing predating an arbitrary epoch can drop
+out of a total whose whole point is that it leaves nothing out.
 """
 
 from __future__ import annotations
@@ -50,13 +52,16 @@ def build(
     prices: PriceList,
     outcomes: Outcomes,
     now: datetime | None = None,
-    recent: int = 12,
+    recent_days: int = 7,
+    recent_limit: int = 200,
 ) -> dict:
     moment = (now or datetime.now(timezone.utc)).astimezone()
-    starts = {
-        "today": moment.replace(hour=0, minute=0, second=0, microsecond=0),
-        "week": moment.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=6),
-        "month": moment.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=29),
+    midnight = moment.replace(hour=0, minute=0, second=0, microsecond=0)
+    starts: dict[str, datetime | None] = {
+        "today": midnight,
+        "week": midnight - timedelta(days=6),
+        "month": midnight - timedelta(days=29),
+        "all": None,
     }
 
     cost_by_key = _cost_by_key(records, prices)
@@ -66,8 +71,19 @@ def build(
         for name, start in starts.items()
     }
 
+    # The table covers the same span as the seven-day card, so the row count and
+    # that card's figure agree. Two lists of "recent drafts" disagreeing by a few
+    # rows is the kind of thing that costs an afternoon to explain.
+    cutoff = midnight - timedelta(days=recent_days - 1)
     rows = []
-    for entry in sorted(entries, key=lambda e: str(e.get("drafted_at", "")), reverse=True)[:recent]:
+    truncated = False
+    for entry in sorted(entries, key=lambda e: str(e.get("drafted_at", "")), reverse=True):
+        when = _parse(entry.get("drafted_at"))
+        if when is None or when < cutoff:
+            continue
+        if len(rows) >= recent_limit:
+            truncated = True
+            break
         rows.append(
             Row(
                 at=str(entry.get("drafted_at", "")),
@@ -83,6 +99,8 @@ def build(
     return {
         "windows": {name: asdict(window) for name, window in windows.items()},
         "recent": [asdict(row) for row in rows],
+        "recent_days": recent_days,
+        "recent_truncated": truncated,
         "outcomes_known": outcomes.known,
         "outcomes_refreshed_at": outcomes.refreshed_at,
         "currency_note": None if prices.usd_to_ils else "Set usd_to_ils in config/pricing.yaml to also show shekels.",
@@ -91,7 +109,7 @@ def build(
 
 def _window(
     label: str,
-    start: datetime,
+    start: datetime | None,
     entries: list[dict],
     records: list[UsageRecord],
     prices: PriceList,
@@ -102,7 +120,7 @@ def _window(
     sent_known = outcomes.known
     for entry in entries:
         when = _parse(entry.get("drafted_at"))
-        if when is None or when < start:
+        if when is None or (start is not None and when < start):
             continue
         answered += 1
         if outcomes.was_sent(entry.get("conversation_id"), str(entry.get("drafted_at", ""))):
@@ -112,7 +130,7 @@ def _window(
     cost = 0.0
     for record in records:
         when = _parse(record.at)
-        if when is None or when < start:
+        if when is None or (start is not None and when < start):
             continue
         input_tokens += record.input_tokens
         output_tokens += record.billed_output_tokens
@@ -155,4 +173,10 @@ def _parse(value) -> datetime | None:
         return None
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=timezone.utc)
-    return moment.astimezone()
+    try:
+        return moment.astimezone()
+    except (OSError, OverflowError, ValueError):
+        # Windows refuses to localise a timestamp before 1970. Left in UTC
+        # rather than dropped: it is still an ordered, comparable moment, and a
+        # stray value in the ledger should not cost the page that reads it.
+        return moment

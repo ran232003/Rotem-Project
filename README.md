@@ -256,10 +256,21 @@ and logs it: emptying the boundary because someone saved a half-written line is 
 worse failure than a stale one. An explicit `--sender` is left fixed, being a
 deliberate narrowing for a single run.
 
+`start_date` in the same file is a floor on how far back the agent will look,
+distinct from `--backlog-days`. The window is rolling and answers "how much
+history on a first run"; the date is fixed and answers "when did this agent start
+work". Whichever is later wins, so neither can widen the other. Without it,
+switching on against a mailbox holding years of client threads drafts a reply to
+whatever the window happens to reach. The day is read in local time, because "from
+the 20th" means the 20th where she is, and reading it as UTC would silently drop
+the first three hours of it in Israel. `doctor` reports the resolved date, fails a
+date in the future — under which nothing would ever be drafted — and warns when
+none is set.
+
 The dashboard edits the list, so the lawyer does not need the file or a
-developer. `rotem_agent/senders.py` replaces only the list items, leaving the
-`mailbox:` line, the comments and the indentation byte-for-byte alone, including
-the file's existing line endings — a config meant to be auditable is worth less
+developer. `rotem_agent/senders.py` touches only the line being changed, leaving
+the comments and the indentation byte-for-byte alone, including the file's
+existing line endings — a config meant to be auditable is worth less
 if editing it destroys the notes explaining what it is for. The write goes
 through a temporary file and a rename, because the watcher reads this file every
 pass and a partial write is a window in which the boundary is whatever happened
@@ -267,6 +278,27 @@ to be flushed. Removing the last address is refused: an empty list makes
 `load_mailbox_config` raise, the running watcher then keeps its previous list,
 and the page would show nobody while the agent carried on drafting. Stopping is
 what the switch is for.
+
+`mailbox:` is editable from the same page, but it is a claim rather than a
+setting and is treated as one. Nothing selects a store: the reader calls
+`GetDefaultFolder` and walks whatever mailbox Outlook opens, so the line exists
+only to be checked against `account_addresses()`. An edit is therefore refused
+unless Outlook is actually signed in to the address, and the refusal names the
+ones that would work. Letting the page write an address Outlook has never heard
+of would convert a wrong setting into a startup warning seen days later with
+nothing linking it to the click that caused it — and would leave the field
+asserting one mailbox while the agent read another. There is one value, so the
+page offers a change and no way to add or remove.
+
+Asking Outlook costs a subprocess, because COM belongs to the thread that
+initialised it and a request handler is the wrong thread. `rotem_agent/accounts.py`
+shells out to `cli accounts`, caches the answer for ten minutes, and fills the
+cache in the background so the page never waits on it; a save does wait, since
+checking against a cache that was never filled is not a check. A failed lookup
+is deliberately not cached — Outlook being closed once should not refuse edits
+for the next ten minutes — and an empty account list is refused rather than read
+as "no address is valid", which is the one case where a missing check could pass
+a wrong value through.
 
 ```bash
 python -m rotem_agent.cli outlook-scan  --sender client@example.com
@@ -331,15 +363,35 @@ shortcut to `dashboard.bat`, drawn with `tools/make_icon.py` so it does not
 inherit the generic batch-file icon, and set to open minimised so the console
 window that hosts it stays out of the way.
 
+A second, red icon stops the agent without the dashboard:
+
+```bash
+python -m rotem_agent.cli stop
+python -m rotem_agent.cli stop --force    # only when the polite one goes unanswered
+```
+
+It exists because the page was the only way to turn the agent off, and the
+fallback if that page would not open — a port taken by something else, a browser
+that would not launch — was a PowerShell command to hunt the process, which is no
+use to the one person who would need it. The icon points at `pythonw` rather than
+at a `.bat`, so nothing flashes on screen, and reports through a Windows message
+box rather than a console: a `.bat` runs under the OEM codepage, where the Hebrew
+would arrive as rubbish, and a message she cannot read is worse than none. The
+console path speaks English for the same reason. Killing the agent can lose a
+draft, so force is offered as a question and never taken from silence: `ask`
+returns False when no box can be shown.
+
 A page on `127.0.0.1:8765` with a switch to start and stop the agent, counts of
-emails answered and replies sent, what has been spent today, this week and this
-month, and the allowlist with add and remove. It is built on the standard
+emails answered and replies sent, what has been spent today, this week, this
+month and since the beginning, the allowlist with add and remove, and the
+declared mailbox alongside the accounts Outlook really has, so a disagreement
+between them is visible rather than buried in a log. It is built on the standard
 library: no framework, no build step,
 nothing to install beyond what the agent already needs, because every dependency
 is something that can fail during setup on a machine where nobody can diagnose
 it. It binds to loopback only, since the page lists client names and subjects.
 
-Five properties are less obvious than they look.
+Seven properties are less obvious than they look.
 
 **The only writes that matter are guarded by the Origin header.** Loopback is
 not a boundary — any site open in the same browser can post to localhost — and
@@ -354,6 +406,15 @@ before binding because `socketserver` sets `SO_REUSEADDR` by default and Windows
 grants it literally: a second bind on a live port succeeds, and requests then
 land on whichever server the OS picks.
 
+**The agent is not the dashboard's child.** It is spawned detached, so closing
+the window cannot kill it mid-draft and leave half a reply in Outlook with its
+spend recorded nowhere. Observed in practice: a watcher started one evening was
+still polling fourteen hours later, long after the dashboard that started it had
+gone. The corollary is that liveness has to be discovered rather than remembered,
+which is what the lock is for — a dashboard opened fresh finds the agent already
+running and reports it, and pressing start returns the existing process instead
+of launching a second.
+
 **Stopping is a request.** The switch writes `state/stop.request`; the watcher
 notices between messages and exits having finished the one it was on.
 Terminating it mid-draft could leave a partly written reply in Outlook and a
@@ -366,6 +427,18 @@ update, or one wedged in a COM call — offers a forced shutdown as a last resor
 Failing to take `state/watch.lock` proves a watcher is alive, stays correct for
 one started from a terminal, and avoids `os.kill(pid, 0)`, which terminates the
 process on Windows rather than testing it.
+
+**The running total has no start date, and the table has one.** The all-time
+figure answers "what has this cost me", which a fixed epoch would quietly
+undercount, so its window has no floor at all rather than a sentinel date. The
+drafts table covers the same seven days as the seven-day card, so the row count
+and that card's figure agree — two lists of "recent drafts" differing by a row is
+the kind of thing that costs an afternoon to explain. Rows come down whole and
+are paged ten at a time in the browser, because a server-side page number would
+have to survive a poll every four seconds; the page is clamped rather than reset
+when the list shrinks, so a draft arriving while she reads page three does not
+throw her back to the top. Beyond two hundred rows the list is capped and the
+page says so instead of paging through a truncation silently.
 
 **Nothing touches Outlook from inside a request.** COM is bound to the thread
 that initialised it, so reading Sent Items runs as a separate short-lived

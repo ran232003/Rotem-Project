@@ -1,10 +1,10 @@
-"""Editing the allowlist in config/mailbox.yaml.
+"""Editing config/mailbox.yaml: the allowlist, and the mailbox it declares.
 
 This file is the agent's only boundary on whose mail it will read, so it is
-edited rather than rewritten: the `mailbox:` line, the comments and the layout
-are left byte-for-byte alone and only the list items are replaced. A dashboard
-that quietly ate the explanatory comments would make the file harder to trust
-for the person who has to audit it later.
+edited rather than rewritten: the comments and the layout are left alone and
+only the line being changed is touched. A dashboard that quietly ate the
+explanatory comments would make the file harder to trust for the person who has
+to audit it later.
 
 Two invariants hold whatever the caller asks for. The write is atomic, so a
 crash mid-save cannot truncate the boundary to something wider than intended.
@@ -34,6 +34,9 @@ _ADDRESS = re.compile(r"^[^@\s,;<>\"']+@[^@\s,;<>\"']+\.[A-Za-z]{2,}$")
 
 _KEY = re.compile(r"^allowed_senders\s*:(?P<inline>.*)$", re.IGNORECASE)
 _ITEM = re.compile(r"^(\s*)-\s*(.+?)\s*$")
+# Case-sensitive, unlike the list above: YAML keys are, so a `Mailbox:` line is
+# not what `load_mailbox_config` reads and must not be reported as though it were.
+_MAILBOX = re.compile(r"^mailbox\s*:(?P<value>.*)$")
 
 
 class SenderError(RuntimeError):
@@ -57,6 +60,72 @@ def validate(address: str) -> str:
     if not _ADDRESS.match(clean):
         raise SenderError(f"{clean} אינה כתובת דוא״ל תקינה.")
     return clean
+
+
+def read_mailbox(path: Path | None = None) -> str:
+    """The single address the `mailbox:` line declares, or empty."""
+    for line in _lines(path or MAILBOX_YAML):
+        match = _MAILBOX.match(line)
+        if match:
+            return normalise(match.group("value").split("#")[0])
+    return ""
+
+
+def set_mailbox(address: str, allowed: list[str] | None, path: Path | None = None) -> str:
+    """Replace the declared mailbox, refusing anything Outlook is not signed in to.
+
+    There is only ever one, so this changes the value rather than adding to a
+    list. `allowed` is the set of addresses Outlook actually has: the field is
+    a claim about reality checked by `doctor`, and letting the page write a
+    claim that is already known to be false would only produce a startup warning
+    nobody connects to the edit that caused it.
+
+    Pass None for `allowed` to skip the check; an empty list means Outlook could
+    not be asked, which is refused rather than treated as "nothing is valid".
+    """
+    target = path or MAILBOX_YAML
+    clean = validate(address)
+
+    if allowed is not None:
+        if not allowed:
+            raise SenderError(
+                "לא ניתן לבדוק מול אאוטלוק עכשיו. יש לוודא שאאוטלוק פתוח ולנסות שוב."
+            )
+        if not any(clean.lower() == known.strip().lower() for known in allowed):
+            joined = ", ".join(allowed)
+            raise SenderError(
+                f"אאוטלוק במחשב הזה אינו מחובר ל־{clean}. "
+                f"הכתובות הזמינות: {joined}."
+            )
+
+    lines = _lines(target)
+    for index, line in enumerate(lines):
+        match = _MAILBOX.match(line)
+        if match:
+            value = match.group("value")
+            note = value[value.index("#") :].strip() if "#" in value else ""
+            lines[index] = f"mailbox: {clean}" + (f"  {note}" if note else "")
+            break
+    else:
+        raise SenderError(f"לא נמצאה שורת mailbox בקובץ {target}")
+
+    _replace(target, "\n".join(lines) + "\n", _newline(target))
+    logger().info("mailbox: set to %s", clean)
+    return clean
+
+
+def start_date(path: Path | None = None):
+    """The configured floor on how far back the agent may look, or None.
+
+    Read through the same loader the watcher uses, so the page cannot disagree
+    with the agent about what the file says.
+    """
+    from rotem_agent.outlook.com import load_mailbox_config
+
+    try:
+        return load_mailbox_config(path or MAILBOX_YAML).start_date
+    except Exception as exc:
+        raise SenderError(str(exc)) from exc
 
 
 def read(path: Path | None = None) -> list[str]:

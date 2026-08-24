@@ -29,7 +29,7 @@ from rotem_agent.retrieval import ChunkStore, GeminiEmbedder, ingest_matter, sea
 from rotem_agent.skill import load_skill
 from rotem_agent.templates import load_templates
 from rotem_agent.state import ConversationMatters, DraftLedger
-from rotem_agent.watch import WatchOptions, run_cycle, watch
+from rotem_agent.watch import WatchOptions, backlog_cutoff, run_cycle, watch
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -182,6 +182,27 @@ def main(argv: list[str] | None = None) -> int:
     )
     outcomes_cmd.add_argument("--days", type=int, default=OUTCOME_DAYS)
 
+    sub.add_parser(
+        "accounts",
+        help="List the mailboxes this Outlook is signed in to, one per line",
+    )
+
+    stop_cmd = sub.add_parser("stop", help="Stop the agent without the dashboard")
+    stop_cmd.add_argument(
+        "--timeout",
+        type=float,
+        default=90.0,
+        help="How long to wait for it to finish the message it is on",
+    )
+    stop_cmd.add_argument(
+        "--force", action="store_true", help="Terminate it instead of asking"
+    )
+    stop_cmd.add_argument(
+        "--dialog",
+        action="store_true",
+        help="Report through a message box rather than the console, for the desktop icon",
+    )
+
     doctor_cmd = sub.add_parser(
         "doctor", help="Check this machine is set up correctly and say what is missing"
     )
@@ -238,6 +259,10 @@ def main(argv: list[str] | None = None) -> int:
             return _run_dashboard(args)
         if args.command == "outcomes":
             return _run_outcomes(args)
+        if args.command == "accounts":
+            return _run_accounts()
+        if args.command == "stop":
+            return _run_stop(args)
         return _run_draft(args)
     except (ConfigError, OutlookError) as exc:
         print(f"\nError: {exc}", file=sys.stderr)
@@ -248,6 +273,84 @@ def main(argv: list[str] | None = None) -> int:
         # been closed hours ago.
         logs.logger().exception("unhandled error running %s", args.command)
         raise
+
+
+def _run_stop(args: argparse.Namespace) -> int:
+    """Turn the agent off from outside the dashboard.
+
+    The dashboard was the only way to stop it, and the fallback when that page
+    will not open — a port taken by something else, a browser that will not
+    launch — was a PowerShell command to hunt the process, which is no use to
+    the one person who would need it. This is what the second desktop icon runs.
+
+    Returns 4 when the agent is still running, so a caller can tell "asked and
+    it stopped" from "asked and nothing happened".
+    """
+    from rotem_agent import control, dialog
+
+    def say(hebrew: str, english: str, *, error: bool = False) -> None:
+        # Hebrew only through a message box. A console runs under the OEM
+        # codepage, where it would arrive as rubbish.
+        if args.dialog:
+            dialog.tell(hebrew, error=error)
+        else:
+            print(english, file=sys.stderr if error else sys.stdout)
+
+    if not control.watcher_status().running:
+        # A request left behind by a watcher that was killed rather than asked
+        # would stop the next one on its first cycle.
+        control.clear_stop()
+        say("הסוכן אינו פועל.", "The agent is not running.")
+        return 0
+
+    if args.force:
+        forced = control.force_stop()
+        if forced.running:
+            say("לא ניתן לכבות את הסוכן.", "Could not stop the agent.", error=True)
+            return 4
+        say("הסוכן כובה בכוח.", "The agent was terminated.")
+        return 0
+
+    if not control.stop_watcher(timeout=args.timeout).running:
+        say(
+            "הסוכן כובה.\n\nלהפעלה מחדש: הסמל 'סוכן הטיוטות' על שולחן העבודה.",
+            "The agent has stopped.",
+        )
+        return 0
+
+    # It never answered: running code from before the request existed, or wedged
+    # in a COM call. Killing it can lose a draft, so it is offered rather than done.
+    agreed = args.dialog and dialog.ask(
+        "הסוכן אינו מגיב לבקשת הכיבוי.\n\n"
+        "לכבות אותו בכוח? טיוטה שנמצאת באמצע כתיבה עלולה ללכת לאיבוד."
+    )
+    if not agreed:
+        say(
+            "הסוכן אינו מגיב לבקשת הכיבוי. הבקשה נשארה בתוקף והוא ייעצר כשיסיים.",
+            "The agent did not answer. Re-run with --force to terminate it.",
+            error=True,
+        )
+        return 4
+
+    if control.force_stop().running:
+        say("לא ניתן לכבות את הסוכן.", "Could not stop the agent.", error=True)
+        return 4
+    say("הסוכן כובה בכוח.", "The agent was terminated.")
+    return 0
+
+
+def _run_accounts() -> int:
+    """Nothing but the addresses, so another process can read them.
+
+    The dashboard needs this to check a mailbox against reality, and cannot ask
+    Outlook itself: COM belongs to the thread that initialised it, and a request
+    handler is the wrong thread.
+    """
+    box = OutlookMailbox(load_mailbox_config())
+    box.connect()
+    for address in box.account_addresses():
+        print(address)
+    return 0
 
 
 def _run_dashboard(args: argparse.Namespace) -> int:
@@ -929,6 +1032,7 @@ def _watch_loop(args) -> int:
         save=args.save,
         interval_seconds=args.interval,
         backlog_days=args.backlog_days,
+        start_date=config.start_date,
         max_per_cycle=args.max_per_cycle,
         source_policy=args.source_policy,
         force=args.force,
@@ -937,6 +1041,14 @@ def _watch_loop(args) -> int:
     print(f"Watching {', '.join(senders)}")
     if not args.sender:
         print("The allowlist is re-read each pass; adding an address needs no restart.")
+    cutoff = backlog_cutoff(args.backlog_days, floor=config.start_date)
+    if cutoff is not None:
+        reason = (
+            "start_date"
+            if config.start_date is not None and cutoff == config.start_date
+            else f"--backlog-days {args.backlog_days}"
+        )
+        print(f"Ignoring anything received before {cutoff.astimezone():%Y-%m-%d %H:%M} ({reason})")
     print(f"Ledger holds {len(ledger)} answered message(s) at {ledger.path}")
     if not args.save:
         print("Dry run: no drafts will be written. Pass --save to create them.")
